@@ -1,37 +1,25 @@
 import { Vector3, Box3 } from "three/webgpu";
 import type { SceneContext } from "../scene";
 
-/**
- * Save a cropped snapshot of just the image plane (no background).
- *
- * Projects the plane's world-space bounding box corners into screen
- * pixels, computes the visible rectangle, then draws that sub-region
- * of the renderer canvas onto a temporary canvas for export.
- */
-export function saveSnapshot(ctx: SceneContext): void {
-  const { renderer, camera, plane, scene, controls } = ctx;
-  // WebGPU discards the framebuffer after presentation, so the canvas
-  // is blank unless we render a fresh frame right before reading it.
-  controls.update();
-  renderer.render(scene, camera);
-  _captureCanvas(renderer, camera, plane);
+interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
-/** Internal: read the renderer canvas and export a cropped PNG. */
-function _captureCanvas(
-  renderer: SceneContext["renderer"],
+/**
+ * Compute the screen-space bounding rectangle of the plane.
+ */
+function computePlaneBounds(
   camera: SceneContext["camera"],
   plane: SceneContext["plane"],
-): void {
-  const canvas = renderer.domElement as HTMLCanvasElement;
-  const w = canvas.width;
-  const h = canvas.height;
-
-  // Compute the plane's axis-aligned bounding box in world space
+  canvasWidth: number,
+  canvasHeight: number,
+): CropRect | null {
   const box = new Box3().setFromObject(plane);
 
-  // Project all 8 corners (works even if the box is flat) to NDC
-  const corners = [
+  const corners: Vector3[] = [
     new Vector3(box.min.x, box.min.y, box.min.z),
     new Vector3(box.min.x, box.min.y, box.max.z),
     new Vector3(box.min.x, box.max.y, box.min.z),
@@ -42,54 +30,109 @@ function _captureCanvas(
     new Vector3(box.max.x, box.max.y, box.max.z),
   ];
 
-  let minX = Infinity,
-    minY = Infinity,
-    maxX = -Infinity,
-    maxY = -Infinity;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
 
-  for (const c of corners) {
-    c.project(camera); // NDC: [-1,1]
-    const sx = ((c.x + 1) / 2) * w;
-    const sy = ((1 - c.y) / 2) * h; // flip Y
-    minX = Math.min(minX, sx);
-    minY = Math.min(minY, sy);
-    maxX = Math.max(maxX, sx);
-    maxY = Math.max(maxY, sy);
+  for (const corner of corners) {
+    corner.project(camera); // Mutates to NDC [-1, 1]
+    const screenX = ((corner.x + 1) / 2) * canvasWidth;
+    const screenY = ((1 - corner.y) / 2) * canvasHeight; // Flip Y
+    minX = Math.min(minX, screenX);
+    minY = Math.min(minY, screenY);
+    maxX = Math.max(maxX, screenX);
+    maxY = Math.max(maxY, screenY);
   }
 
-  // Clamp to canvas bounds and round to whole pixels
-  const sx = Math.max(0, Math.floor(minX));
-  const sy = Math.max(0, Math.floor(minY));
-  const sw = Math.min(w, Math.ceil(maxX)) - sx;
-  const sh = Math.min(h, Math.ceil(maxY)) - sy;
+  // Clamp to canvas bounds
+  const x = Math.max(0, Math.floor(minX));
+  const y = Math.max(0, Math.floor(minY));
+  const width = Math.min(canvasWidth, Math.ceil(maxX)) - x;
+  const height = Math.min(canvasHeight, Math.ceil(maxY)) - y;
 
-  if (sw <= 0 || sh <= 0) {
-    // Plane is off-screen — fall back to full canvas
+  if (width <= 0 || height <= 0) {
+    return null; // Off-screen
+  }
+
+  return { x, y, width, height };
+}
+
+/**
+ * Download a blob as a file.
+ */
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Save a cropped snapshot of the image plane.
+ */
+export function saveSnapshot(ctx: SceneContext): void {
+  const { renderer, camera, plane, scene, controls } = ctx;
+
+  // Render a fresh frame (WebGPU discards after presentation)
+  controls.update();
+  renderer.render(scene, camera);
+
+  const canvas = renderer.domElement as HTMLCanvasElement;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  const bounds = computePlaneBounds(camera, plane, w, h);
+
+  if (!bounds) {
+    // Plane is off-screen; save full canvas
     canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `rti-snapshot-${Date.now()}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
+      if (blob) {
+        downloadBlob(blob, `rti-snapshot-full-${Date.now()}.png`);
+      }
     }, "image/png");
     return;
   }
 
-  // Draw the cropped region to a temporary canvas
-  const tmp = document.createElement("canvas");
-  tmp.width = sw;
-  tmp.height = sh;
-  tmp.getContext("2d")!.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  // Create temporary canvas with matching color space
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = bounds.width;
+  tempCanvas.height = bounds.height;
 
-  tmp.toBlob((blob) => {
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `rti-snapshot-${Date.now()}.png`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, "image/png");
+  // ✅ Critical: Match the WebGPU renderer's color space
+  const ctx2d = tempCanvas.getContext("2d", {
+    colorSpace: "display-p3", // Use "srgb" if your renderer uses SRGBColorSpace
+    alpha: true,
+  } satisfies CanvasRenderingContext2DSettings);
+
+  if (!ctx2d) {
+    console.error("Failed to create 2D context");
+    return;
+  }
+
+  // Draw cropped region
+  ctx2d.drawImage(
+    canvas,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    0,
+    0,
+    bounds.width,
+    bounds.height,
+  );
+
+  // Export with maximum quality
+  tempCanvas.toBlob(
+    (blob) => {
+      if (blob) {
+        downloadBlob(blob, `rti-snapshot-${Date.now()}.png`);
+      }
+    },
+    "image/png",
+    1.0, // Quality parameter (though PNG ignores this, good practice)
+  );
 }
