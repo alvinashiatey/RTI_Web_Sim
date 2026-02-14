@@ -168,8 +168,9 @@ export function saveSnapshot(ctx: SceneContext): void {
       // Render through the full pipeline into the RT
       renderer.setOutputRenderTarget(rt);
       controls.update();
-      // `renderAsync` ensures the GPU work completes before readback
-      await (renderer as any).renderAsync(scene, camera);
+      // `render` issues the draw; subsequent readRenderTargetPixelsAsync
+      // will wait for GPU completion where necessary.
+      renderer.render(scene, camera);
 
       // If the plane is off-screen, capture the full canvas; otherwise
       // read only the cropped region for smaller downloads.
@@ -195,7 +196,7 @@ export function saveSnapshot(ctx: SceneContext): void {
           const probeCanvas = document.createElement("canvas");
           probeCanvas.width = canvas.width;
           probeCanvas.height = canvas.height;
-          const probeCtx = probeCanvas.getContext("2d");
+          const probeCtx = probeCanvas.getContext("2d", { willReadFrequently: true });
           if (probeCtx) probeCtx.drawImage(canvas, 0, 0);
 
           const sampleX = Math.max(1, Math.min(w - 2, Math.floor(w / 4)));
@@ -282,7 +283,7 @@ export function saveSnapshot(ctx: SceneContext): void {
         const probeCanvas = document.createElement("canvas");
         probeCanvas.width = canvas.width;
         probeCanvas.height = canvas.height;
-        const probeCtx = probeCanvas.getContext("2d");
+        const probeCtx = probeCanvas.getContext("2d", { willReadFrequently: true });
         if (probeCtx) probeCtx.drawImage(canvas, 0, 0);
 
         const sampleX = Math.max(1, Math.min(bounds.x + Math.floor(rw / 4), canvas.width - 2));

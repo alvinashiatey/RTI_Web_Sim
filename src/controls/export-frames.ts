@@ -163,7 +163,7 @@ export async function exportAnimationFrames(
       controls.update();
 
       // Render through the normal pipeline — output lands in `rt`.
-      await renderer.renderAsync(scene, camera);
+      renderer.render(scene, camera);
 
       // Read pixels directly from GPU memory.
       const rect = _planeScreenRect(camera, plane, w, h);
@@ -348,7 +348,7 @@ export async function exportAnimationVideo(
       syncHelper(lights);
       controls.update();
 
-      await renderer.renderAsync(scene, camera);
+      renderer.render(scene, camera);
 
       // Read full RT back and convert to 8-bit with ordered dithering.
       const raw = await renderer.readRenderTargetPixelsAsync(
@@ -376,7 +376,7 @@ export async function exportAnimationVideo(
           const probe = document.createElement("canvas");
           probe.width = srcCanvas.width;
           probe.height = srcCanvas.height;
-          const pctx = probe.getContext("2d");
+          const pctx = probe.getContext("2d", { willReadFrequently: true });
           if (pctx) pctx.drawImage(srcCanvas, 0, 0);
 
           const samples: Array<[number, number]> = [
