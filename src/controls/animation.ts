@@ -9,6 +9,8 @@ export interface AnimParams {
   endAzimuth: number;
   steps: number;
   duration: number;
+  /** Recording quality multiplier used for video export (1,2,3) */
+  recordQuality: number;
 }
 
 /**
@@ -28,20 +30,13 @@ export function buildAnimationFolder(
     endAzimuth: 360,
     steps: 36,
     duration: 3.0,
+    recordQuality: 2,
   };
 
-  animFolder.addBinding(animParams, "startAzimuth", {
-    min: 0,
-    max: 360,
-    step: 1,
-    label: "Start (°)",
-  });
-  animFolder.addBinding(animParams, "endAzimuth", {
-    min: 0,
-    max: 360,
-    step: 1,
-    label: "End (°)",
-  });
+  // Start / End are intentionally *not* exposed in the UI any more; the
+  // animation will sweep the configured arc programmatically (defaults
+  // to 0 → 360).  Expose `steps` and `duration`, plus a Recording Quality
+  // dropdown that controls export resolution.
   animFolder.addBinding(animParams, "steps", {
     min: 2,
     max: 360,
@@ -53,6 +48,17 @@ export function buildAnimationFolder(
     max: 30,
     step: 0.5,
     label: "Duration (s)",
+  });
+
+  // Recording quality controls the resolution multiplier used during
+  // WebM export. 1× = screen size, 2× ≈ HD, 3× ≈ higher-res (capped).
+  animFolder.addBinding(animParams, "recordQuality", {
+    label: "Recording Quality",
+    options: {
+      "1× (screen)": 1,
+      "2× (HD)": 2,
+      "3× (2K)": 3,
+    },
   });
 
   let animId: number | null = null;
@@ -157,15 +163,24 @@ export function buildAnimationFolder(
     const savedAzimuth = lightParams.azimuth;
     exportVideoBtn.title = "Exporting… 0%";
     try {
-      await exportAnimationVideo(ctx, lightParams, lights, pane, animParams, (pct) => {
-        exportVideoBtn.title = `Exporting… ${pct}%`;
-      });
+      await exportAnimationVideo(
+        ctx,
+        lightParams,
+        lights,
+        pane,
+        animParams,
+        (pct) => {
+          exportVideoBtn.title = `Exporting… ${pct}%`;
+        },
+      );
     } catch (err) {
       // keep error handling minimal — log + toast
       // eslint-disable-next-line no-console
       console.error(err);
       // show a simple alert so users know something went wrong
-      alert(`Video export failed: ${err instanceof Error ? err.message : String(err)}`);
+      alert(
+        `Video export failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       lightParams.azimuth = savedAzimuth;
       setLightPosition(lights.pointLight, lightParams);

@@ -257,11 +257,18 @@ export async function exportAnimationVideo(
   const { renderer, camera, scene, controls, plane } = ctx;
 
   // Choose the best-supported WebM mime type.
-  const mimeCandidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  const mimeCandidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
   let mime: string | undefined;
   for (const c of mimeCandidates) {
     try {
-      if (typeof MediaRecorder !== "undefined" && (MediaRecorder as any).isTypeSupported?.(c)) {
+      if (
+        typeof MediaRecorder !== "undefined" &&
+        (MediaRecorder as any).isTypeSupported?.(c)
+      ) {
         mime = c;
         break;
       }
@@ -271,15 +278,21 @@ export async function exportAnimationVideo(
   }
   mime = mime ?? "video/webm";
 
-  const fps = Math.max(1, Math.min(60, Math.round(animParams.steps / Math.max(animParams.duration, 0.001))));
+  const fps = Math.max(
+    1,
+    Math.min(
+      60,
+      Math.round(animParams.steps / Math.max(animParams.duration, 0.001)),
+    ),
+  );
 
   // Recording resolution: default to 2× the canvas backing, capped to 3840px width.
   const srcCanvas = renderer.domElement as HTMLCanvasElement;
   const srcW = Math.max(1, srcCanvas.width);
   const srcH = Math.max(1, srcCanvas.height);
-  const recScale = Math.min(3, Math.max(1, Math.floor(3840 / srcW)));
-  const recW = Math.min(3840, srcW * Math.min(2, recScale));
-  const recH = Math.round((recW / srcW) * srcH);
+  const quality = (animParams as any).recordQuality ?? 2;
+  const recW = Math.min(3840, Math.max(1, Math.round(srcW * quality)));
+  const recH = Math.max(1, Math.round((recW / srcW) * srcH));
 
   // RenderTarget + hidden canvas capture path (higher-quality and deterministic).
   const rt = new RenderTarget(recW, recH, { type: FloatType });
@@ -320,9 +333,30 @@ export async function exportAnimationVideo(
   try {
     renderer.setOutputRenderTarget(rt);
 
+    // Orientation detection flag: null = not yet tested, true = data is
+    // rotated 180°, false = normal orientation.
+    let rotated180: boolean | null = null;
+
+    const rotate180 = (src: Uint8ClampedArray, w: number, h: number) => {
+      const out = new Uint8ClampedArray(src.length);
+      for (let yy = 0; yy < h; yy++) {
+        for (let xx = 0; xx < w; xx++) {
+          const si = (yy * w + xx) * 4;
+          const di = ((h - 1 - yy) * w + (w - 1 - xx)) * 4;
+          out[di] = src[si];
+          out[di + 1] = src[si + 1];
+          out[di + 2] = src[si + 2];
+          out[di + 3] = src[si + 3];
+        }
+      }
+      return out;
+    };
+
     for (let i = 0; i < animParams.steps; i++) {
       const fraction = i / Math.max(animParams.steps - 1, 1);
-      lightParams.azimuth = animParams.startAzimuth + (animParams.endAzimuth - animParams.startAzimuth) * fraction;
+      lightParams.azimuth =
+        animParams.startAzimuth +
+        (animParams.endAzimuth - animParams.startAzimuth) * fraction;
       setLightPosition(lights.pointLight, lightParams);
       syncHelper(lights);
       controls.update();
@@ -330,11 +364,66 @@ export async function exportAnimationVideo(
       await renderer.renderAsync(scene, camera);
 
       // Read full RT back and convert to 8-bit with ordered dithering.
-      const raw = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, recW, recH);
+      const raw = await renderer.readRenderTargetPixelsAsync(
+        rt,
+        0,
+        0,
+        recW,
+        recH,
+      );
       const bytesPerTexel = 16; // RGBA32Float
       const alignedBytesPerRow = Math.ceil((recW * bytesPerTexel) / 256) * 256;
       const alignedFloatsPerRow = alignedBytesPerRow / 4;
-      const pixels = _floatToDitheredUint8(raw as Float32Array, recW, recH, alignedFloatsPerRow);
+      let pixels = _floatToDitheredUint8(
+        raw as Float32Array,
+        recW,
+        recH,
+        alignedFloatsPerRow,
+      );
+
+      // Detect/correct 180°-rotated readbacks on the first frame.
+      if (rotated180 === null) {
+        try {
+          const probe = document.createElement("canvas");
+          probe.width = srcCanvas.width;
+          probe.height = srcCanvas.height;
+          const pctx = probe.getContext("2d");
+          if (pctx) pctx.drawImage(srcCanvas, 0, 0);
+
+          const sampleX = Math.max(1, Math.min(srcCanvas.width - 2, Math.floor(srcCanvas.width / 4)));
+          const sampleY = Math.max(1, Math.min(srcCanvas.height - 2, Math.floor(srcCanvas.height / 4)));
+          const screenSample = pctx?.getImageData(sampleX, sampleY, 1, 1).data;
+
+          if (screenSample) {
+            const mapX = Math.floor((sampleX / srcCanvas.width) * recW);
+            const mapY = Math.floor((sampleY / srcCanvas.height) * recH);
+
+            const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
+              const i = (y * width + x) * 4;
+              return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]];
+            };
+
+            const close = (a: number[], b: Uint8ClampedArray, tol = 24) =>
+              Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+
+            const captured = getPixel(pixels, mapX, mapY, recW);
+            if (close(screenSample as unknown as number[], new Uint8ClampedArray(captured))) {
+              rotated180 = false;
+            } else {
+              const rot = getPixel(pixels, recW - 1 - mapX, recH - 1 - mapY, recW);
+              if (close(screenSample as unknown as number[], new Uint8ClampedArray(rot))) {
+                rotated180 = true;
+              } else {
+                rotated180 = false;
+              }
+            }
+          }
+        } catch (e) {
+          rotated180 = false;
+        }
+      }
+
+      if (rotated180) pixels = rotate180(pixels, recW, recH);
 
       outCtx.putImageData(new ImageData(pixels, recW, recH), 0, 0);
 
