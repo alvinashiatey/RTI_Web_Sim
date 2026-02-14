@@ -188,10 +188,10 @@ export function saveSnapshot(ctx: SceneContext): void {
         // buffer so the DOM ImageData constructor accepts it).
         let imagePixels = Uint8ClampedArray.from(pixels as Iterable<number>);
 
-        // Detect/correct orientation mismatches (some backends / readbacks
-        // may return flipped buffers). Compare a sample pixel from the
-        // onscreen canvas to the captured buffer; if they mismatch in a
-        // flipped position, rotate/flip the captured pixels accordingly.
+        // Robust orientation detection: compare several candidate
+        // transforms (identity, rot180, flipX, flipY, rot90, rot270)
+        // and pick the best match by voting. This fixes mirrored/rotated
+        // readbacks across different backends.
         try {
           const probeCanvas = document.createElement("canvas");
           probeCanvas.width = canvas.width;
@@ -199,42 +199,84 @@ export function saveSnapshot(ctx: SceneContext): void {
           const probeCtx = probeCanvas.getContext("2d", { willReadFrequently: true });
           if (probeCtx) probeCtx.drawImage(canvas, 0, 0);
 
-          const sampleX = Math.max(1, Math.min(w - 2, Math.floor(w / 4)));
-          const sampleY = Math.max(1, Math.min(h - 2, Math.floor(h / 4)));
-          const screenSample = probeCtx?.getImageData(sampleX, sampleY, 1, 1).data;
+          const samples: Array<[number, number]> = [
+            [Math.floor(w * 0.25), Math.floor(h * 0.25)],
+            [Math.floor(w * 0.75), Math.floor(h * 0.25)],
+            [Math.floor(w * 0.25), Math.floor(h * 0.75)],
+            [Math.floor(w * 0.75), Math.floor(h * 0.75)],
+            [Math.floor(w * 0.5), Math.floor(h * 0.5)],
+          ];
 
-          if (screenSample) {
-            const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
-              const i = (y * width + x) * 4;
-              return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]];
-            };
+          const transforms = {
+            identity: (u: number, v: number) => [u, v],
+            rot180: (u: number, v: number) => [1 - u, 1 - v],
+            flipX: (u: number, v: number) => [1 - u, v],
+            flipY: (u: number, v: number) => [u, 1 - v],
+            rot90: (u: number, v: number) => [v, 1 - u],
+            rot270: (u: number, v: number) => [1 - v, u],
+          } as const;
 
-            const close = (a: number[], b: Uint8ClampedArray, tol = 24) =>
-              Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+          const scores: Record<string, number> = {
+            identity: 0,
+            rot180: 0,
+            flipX: 0,
+            flipY: 0,
+            rot90: 0,
+            rot270: 0,
+          };
 
-            const cx = sampleX; // local coords for full-canvas capture
-            const cy = sampleY;
-            const captured = getPixel(imagePixels, cx, cy, w);
+          const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
+            const i = (y * width + x) * 4;
+            return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]] as number[];
+          };
 
-            if (!close(screenSample as unknown as number[], new Uint8ClampedArray(captured))) {
-              // Check if rotated 180°
-              const rot180 = getPixel(imagePixels, w - 1 - cx, h - 1 - cy, w);
-              if (close(screenSample as unknown as number[], new Uint8ClampedArray(rot180))) {
-                // rotate 180°
-                const outArr = new Uint8ClampedArray(imagePixels.length);
-                for (let yy = 0; yy < h; yy++) {
-                  for (let xx = 0; xx < w; xx++) {
-                    const si = (yy * w + xx) * 4;
-                    const di = ((h - 1 - yy) * w + (w - 1 - xx)) * 4;
-                    outArr[di] = imagePixels[si];
-                    outArr[di + 1] = imagePixels[si + 1];
-                    outArr[di + 2] = imagePixels[si + 2];
-                    outArr[di + 3] = imagePixels[si + 3];
-                  }
-                }
-                imagePixels = outArr;
+          const close = (a: number[], b: number[], tol = 40) =>
+            Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+
+          for (const [sx, sy] of samples) {
+            const sd = probeCtx?.getImageData(sx, sy, 1, 1).data;
+            if (!sd) continue;
+            const screenSample = [sd[0], sd[1], sd[2]] as number[];
+
+            const u = sx / w;
+            const v = sy / h;
+
+            for (const k of Object.keys(transforms) as Array<keyof typeof transforms>) {
+              const [uu, vv] = transforms[k](u, v);
+              const bx = Math.max(0, Math.min(w - 1, Math.floor(uu * (w - 1))));
+              const by = Math.max(0, Math.min(h - 1, Math.floor(vv * (h - 1))));
+              const cap = getPixel(imagePixels, bx, by, w);
+              if (close(screenSample, [cap[0], cap[1], cap[2]])) scores[k]++;
+            }
+          }
+
+          let best = "identity";
+          let bestScore = -1;
+          for (const k of Object.keys(scores)) {
+            if (scores[k] > bestScore) {
+              best = k;
+              bestScore = scores[k];
+            }
+          }
+
+          if (best !== "identity") {
+            const out = new Uint8ClampedArray(imagePixels.length);
+            for (let yy = 0; yy < h; yy++) {
+              for (let xx = 0; xx < w; xx++) {
+                const u = xx / w;
+                const v = yy / h;
+                const [uu, vv] = transforms[best as keyof typeof transforms](u, v);
+                const sx = Math.max(0, Math.min(w - 1, Math.floor(uu * (w - 1))));
+                const sy = Math.max(0, Math.min(h - 1, Math.floor(vv * (h - 1))));
+                const si = (sy * w + sx) * 4;
+                const di = (yy * w + xx) * 4;
+                out[di] = imagePixels[si];
+                out[di + 1] = imagePixels[si + 1];
+                out[di + 2] = imagePixels[si + 2];
+                out[di + 3] = imagePixels[si + 3];
               }
             }
+            imagePixels = out;
           }
         } catch (e) {
           /* ignore detection errors — fall back to saving as-is */
@@ -276,9 +318,10 @@ export function saveSnapshot(ctx: SceneContext): void {
       const pixels = floatToDitheredUint8(raw as Float32Array, rw, rh, alignedFloatsPerRow);
       let imagePixels = Uint8ClampedArray.from(pixels as Iterable<number>);
 
-      // Orientation detection for cropped capture (compare onscreen sample
-      // with captured buffer). If the captured buffer is rotated 180° we
-      // rotate it back before saving.
+      // Robust orientation detection for the cropped plane region. Use
+      // multiple sample points inside `bounds` and vote across candidate
+      // transforms (identity / rotations / flips). Apply the winning
+      // transform to `imagePixels` if needed.
       try {
         const probeCanvas = document.createElement("canvas");
         probeCanvas.width = canvas.width;
@@ -286,40 +329,89 @@ export function saveSnapshot(ctx: SceneContext): void {
         const probeCtx = probeCanvas.getContext("2d", { willReadFrequently: true });
         if (probeCtx) probeCtx.drawImage(canvas, 0, 0);
 
-        const sampleX = Math.max(1, Math.min(bounds.x + Math.floor(rw / 4), canvas.width - 2));
-        const sampleY = Math.max(1, Math.min(bounds.y + Math.floor(rh / 4), canvas.height - 2));
-        const screenSample = probeCtx?.getImageData(sampleX, sampleY, 1, 1).data;
+        const bx = bounds.x;
+        const by = bounds.y;
+        const bw = bounds.width;
+        const bh = bounds.height;
+        const samples: Array<[number, number]> = [
+          [bx + Math.floor(bw * 0.25), by + Math.floor(bh * 0.25)],
+          [bx + Math.floor(bw * 0.75), by + Math.floor(bh * 0.25)],
+          [bx + Math.floor(bw * 0.25), by + Math.floor(bh * 0.75)],
+          [bx + Math.floor(bw * 0.75), by + Math.floor(bh * 0.75)],
+          [bx + Math.floor(bw * 0.5), by + Math.floor(bh * 0.5)],
+        ];
 
-        if (screenSample) {
-          const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
-            const i = (y * width + x) * 4;
-            return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]];
-          };
+        const transforms = {
+          identity: (u: number, v: number) => [u, v],
+          rot180: (u: number, v: number) => [1 - u, 1 - v],
+          flipX: (u: number, v: number) => [1 - u, v],
+          flipY: (u: number, v: number) => [u, 1 - v],
+          rot90: (u: number, v: number) => [v, 1 - u],
+          rot270: (u: number, v: number) => [1 - v, u],
+        } as const;
 
-          const close = (a: number[], b: Uint8ClampedArray, tol = 24) =>
-            Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+        const scores: Record<string, number> = {
+          identity: 0,
+          rot180: 0,
+          flipX: 0,
+          flipY: 0,
+          rot90: 0,
+          rot270: 0,
+        };
 
-          const lx = sampleX - bounds.x;
-          const ly = sampleY - bounds.y;
-          const captured = getPixel(imagePixels, lx, ly, rw);
+        const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
+          const i = (y * width + x) * 4;
+          return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]] as number[];
+        };
 
-          if (!close(screenSample as unknown as number[], new Uint8ClampedArray(captured))) {
-            const rot180 = getPixel(imagePixels, rw - 1 - lx, rh - 1 - ly, rw);
-            if (close(screenSample as unknown as number[], new Uint8ClampedArray(rot180))) {
-              const outArr = new Uint8ClampedArray(imagePixels.length);
-              for (let yy = 0; yy < rh; yy++) {
-                for (let xx = 0; xx < rw; xx++) {
-                  const si = (yy * rw + xx) * 4;
-                  const di = ((rh - 1 - yy) * rw + (rw - 1 - xx)) * 4;
-                  outArr[di] = imagePixels[si];
-                  outArr[di + 1] = imagePixels[si + 1];
-                  outArr[di + 2] = imagePixels[si + 2];
-                  outArr[di + 3] = imagePixels[si + 3];
-                }
-              }
-              imagePixels = outArr;
+        const close = (a: number[], b: number[], tol = 40) =>
+          Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+
+        for (const [sx, sy] of samples) {
+          const sd = probeCtx?.getImageData(sx, sy, 1, 1).data;
+          if (!sd) continue;
+          const screenSample = [sd[0], sd[1], sd[2]] as number[];
+
+          // normalized position relative to the cropped readback
+          const u = (sx - bx) / bw;
+          const v = (sy - by) / bh;
+
+          for (const k of Object.keys(transforms) as Array<keyof typeof transforms>) {
+            const [uu, vv] = transforms[k](u, v);
+            const bx2 = Math.max(0, Math.min(rw - 1, Math.floor(uu * (rw - 1))));
+            const by2 = Math.max(0, Math.min(rh - 1, Math.floor(vv * (rh - 1))));
+            const cap = getPixel(imagePixels, bx2, by2, rw);
+            if (close(screenSample, [cap[0], cap[1], cap[2]])) scores[k]++;
+          }
+        }
+
+        let best = "identity";
+        let bestScore = -1;
+        for (const k of Object.keys(scores)) {
+          if (scores[k] > bestScore) {
+            best = k;
+            bestScore = scores[k];
+          }
+        }
+
+        if (best !== "identity") {
+          const out = new Uint8ClampedArray(imagePixels.length);
+          for (let yy = 0; yy < rh; yy++) {
+            for (let xx = 0; xx < rw; xx++) {
+              const u = xx / rw;
+              const v = yy / rh;
+              const [uu, vv] = transforms[best as keyof typeof transforms](u, v);
+              const sx2 = Math.max(0, Math.min(rw - 1, Math.floor(uu * (rw - 1))));
+              const sy2 = Math.max(0, Math.min(rh - 1, Math.floor(vv * (rh - 1))));
+              const si = (sy2 * rw + sx2) * 4;
+              const di = (yy * rw + xx) * 4;
+              out[di] = imagePixels[si];
+              out[di + 1] = imagePixels[si + 1];
+              out[di + 2] = imagePixels[si + 2];
+              out[di + 3] = imagePixels[si + 3];
             }
           }
+          imagePixels = out;
         }
       } catch (e) {
         /* ignore detection errors */
