@@ -199,6 +199,8 @@ export function saveSnapshot(ctx: SceneContext): void {
           const probeCtx = probeCanvas.getContext("2d", { willReadFrequently: true });
           if (probeCtx) probeCtx.drawImage(canvas, 0, 0);
 
+          // Use small patch comparison (5×5) per sample and sum absolute
+          // differences — more robust across visual effects (e.g. Normal Map).
           const samples: Array<[number, number]> = [
             [Math.floor(w * 0.25), Math.floor(h * 0.25)],
             [Math.floor(w * 0.75), Math.floor(h * 0.25)],
@@ -225,33 +227,74 @@ export function saveSnapshot(ctx: SceneContext): void {
             rot270: 0,
           };
 
-          const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
-            const i = (y * width + x) * 4;
-            return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]] as number[];
+          const getPatchSumAbs = (
+            srcArr: Uint8ClampedArray,
+            sw: number,
+            cx: number,
+            cy: number,
+            radius = 2,
+          ) => {
+            let sum = 0;
+            const sMinX = Math.max(0, cx - radius);
+            const sMaxX = Math.min(sw - 1, cx + radius);
+            const sMinY = Math.max(0, cy - radius);
+            const sMaxY = Math.min((srcArr.length / 4) / sw - 1, cy + radius);
+            for (let yy = sMinY; yy <= sMaxY; yy++) {
+              for (let xx = sMinX; xx <= sMaxX; xx++) {
+                const i = (yy * sw + xx) * 4;
+                sum += srcArr[i] + srcArr[i + 1] + srcArr[i + 2];
+              }
+            }
+            return sum;
           };
 
-          const close = (a: number[], b: number[], tol = 40) =>
-            Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
-
+          // Precompute screen patches from probe canvas
+          const patchRadius = 2; // 5×5
+          const screenPatches: Array<number> = [];
           for (const [sx, sy] of samples) {
-            const sd = probeCtx?.getImageData(sx, sy, 1, 1).data;
-            if (!sd) continue;
-            const screenSample = [sd[0], sd[1], sd[2]] as number[];
+            const sx0 = Math.max(0, sx - patchRadius);
+            const sy0 = Math.max(0, sy - patchRadius);
+            const size = patchRadius * 2 + 1;
+            let imgData: ImageData | null = null;
+            try {
+              imgData = probeCtx?.getImageData(sx0, sy0, size, size) ?? null;
+            } catch (e) {
+              imgData = null;
+            }
+            if (!imgData) {
+              screenPatches.push(-1);
+              continue;
+            }
+            // sum RGB for patch
+            let ssum = 0;
+            const arr = imgData.data;
+            for (let i = 0; i < arr.length; i += 4) ssum += arr[i] + arr[i + 1] + arr[i + 2];
+            screenPatches.push(ssum);
+          }
 
-            const u = sx / w;
-            const v = sy / h;
+          // For each candidate transform, compute total patch-difference
+          for (const k of Object.keys(transforms) as Array<keyof typeof transforms>) {
+            let totalDiff = 0;
+            for (let idx = 0; idx < samples.length; idx++) {
+              const [sx, sy] = samples[idx];
+              const screenSum = screenPatches[idx];
+              if (screenSum < 0) continue;
 
-            for (const k of Object.keys(transforms) as Array<keyof typeof transforms>) {
+              const u = sx / w;
+              const v = sy / h;
               const [uu, vv] = transforms[k](u, v);
               const bx = Math.max(0, Math.min(w - 1, Math.floor(uu * (w - 1))));
               const by = Math.max(0, Math.min(h - 1, Math.floor(vv * (h - 1))));
-              const cap = getPixel(imagePixels, bx, by, w);
-              if (close(screenSample, [cap[0], cap[1], cap[2]])) scores[k]++;
+
+              const capSum = getPatchSumAbs(imagePixels, w, bx, by, patchRadius);
+              totalDiff += Math.abs(screenSum - capSum);
             }
+            scores[k] = -totalDiff; // lower diff → higher score
           }
 
+          // Pick best transform (max score)
           let best = "identity";
-          let bestScore = -1;
+          let bestScore = -Infinity;
           for (const k of Object.keys(scores)) {
             if (scores[k] > bestScore) {
               best = k;

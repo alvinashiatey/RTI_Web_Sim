@@ -337,8 +337,6 @@ export async function exportAnimationVideo(
     // rotated 180°, false = normal orientation.
     let rotated180: boolean | null = null;
 
-
-
     for (let i = 0; i < animParams.steps; i++) {
       const fraction = i / Math.max(animParams.steps - 1, 1);
       lightParams.azimuth =
@@ -382,50 +380,122 @@ export async function exportAnimationVideo(
           // Sample inside the plane bounding box (more reliable than using
           // arbitrary canvas fractions). Fall back to center samples if the
           // plane is off-screen.
-          const bounds = _planeScreenRect(camera, plane, srcCanvas.width, srcCanvas.height);
+          const bounds = _planeScreenRect(
+            camera,
+            plane,
+            srcCanvas.width,
+            srcCanvas.height,
+          );
           const samplePoints: Array<[number, number]> = [];
           if (bounds) {
             const { sx, sy, sw, sh } = bounds;
-            samplePoints.push([sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.25)]);
-            samplePoints.push([sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.25)]);
-            samplePoints.push([sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.75)]);
-            samplePoints.push([sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.75)]);
-            samplePoints.push([sx + Math.floor(sw * 0.5), sy + Math.floor(sh * 0.5)]);
+            samplePoints.push([
+              sx + Math.floor(sw * 0.25),
+              sy + Math.floor(sh * 0.25),
+            ]);
+            samplePoints.push([
+              sx + Math.floor(sw * 0.75),
+              sy + Math.floor(sh * 0.25),
+            ]);
+            samplePoints.push([
+              sx + Math.floor(sw * 0.25),
+              sy + Math.floor(sh * 0.75),
+            ]);
+            samplePoints.push([
+              sx + Math.floor(sw * 0.75),
+              sy + Math.floor(sh * 0.75),
+            ]);
+            samplePoints.push([
+              sx + Math.floor(sw * 0.5),
+              sy + Math.floor(sh * 0.5),
+            ]);
           } else {
-            samplePoints.push([Math.floor(srcCanvas.width * 0.25), Math.floor(srcCanvas.height * 0.25)]);
-            samplePoints.push([Math.floor(srcCanvas.width * 0.75), Math.floor(srcCanvas.height * 0.25)]);
-            samplePoints.push([Math.floor(srcCanvas.width * 0.25), Math.floor(srcCanvas.height * 0.75)]);
-            samplePoints.push([Math.floor(srcCanvas.width * 0.75), Math.floor(srcCanvas.height * 0.75)]);
-            samplePoints.push([Math.floor(srcCanvas.width * 0.5), Math.floor(srcCanvas.height * 0.5)]);
+            samplePoints.push([
+              Math.floor(srcCanvas.width * 0.25),
+              Math.floor(srcCanvas.height * 0.25),
+            ]);
+            samplePoints.push([
+              Math.floor(srcCanvas.width * 0.75),
+              Math.floor(srcCanvas.height * 0.25),
+            ]);
+            samplePoints.push([
+              Math.floor(srcCanvas.width * 0.25),
+              Math.floor(srcCanvas.height * 0.75),
+            ]);
+            samplePoints.push([
+              Math.floor(srcCanvas.width * 0.75),
+              Math.floor(srcCanvas.height * 0.75),
+            ]);
+            samplePoints.push([
+              Math.floor(srcCanvas.width * 0.5),
+              Math.floor(srcCanvas.height * 0.5),
+            ]);
           }
 
-          let normalVotes = 0;
-          let rotVotes = 0;
+          // Patch-based comparison (5×5) per sample — robust when effects
+          // change colorization (normal map visualization, etc.).
+          const patchRadius = 2; // 5×5 patch
 
-          const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
-            const i = (y * width + x) * 4;
-            return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]] as number[];
+          const getPatchSumCanvas = (ctx: CanvasRenderingContext2D, cx: number, cy: number) => {
+            const sx = Math.max(0, cx - patchRadius);
+            const sy = Math.max(0, cy - patchRadius);
+            const sizeX = Math.min(patchRadius * 2 + 1, ctx.canvas.width - sx);
+            const sizeY = Math.min(patchRadius * 2 + 1, ctx.canvas.height - sy);
+            try {
+              const id = ctx.getImageData(sx, sy, sizeX, sizeY).data;
+              let s = 0;
+              for (let i = 0; i < id.length; i += 4) s += id[i] + id[i + 1] + id[i + 2];
+              return s;
+            } catch (e) {
+              return -1;
+            }
           };
 
-          const close = (a: number[], b: number[], tol = 48) =>
-            Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+          const getPatchSumBuffer = (
+            buf: Uint8ClampedArray,
+            bw: number,
+            cx: number,
+            cy: number,
+          ) => {
+            const sx = Math.max(0, cx - patchRadius);
+            const sy = Math.max(0, cy - patchRadius);
+            const ex = Math.min(bw - 1, cx + patchRadius);
+            const eh = Math.floor(buf.length / 4 / bw) - 1;
+            const ey = Math.max(0, Math.min(eh, cy + patchRadius));
+            let s = 0;
+            for (let y = sy; y <= ey; y++) {
+              for (let x = sx; x <= ex; x++) {
+                const i = (y * bw + x) * 4;
+                s += buf[i] + buf[i + 1] + buf[i + 2];
+              }
+            }
+            return s;
+          };
+
+          let normalScore = 0;
+          let rotScore = 0;
 
           for (const [sx, sy] of samplePoints) {
-            const screenData = pctx?.getImageData(sx, sy, 1, 1).data;
-            if (!screenData) continue;
-            const screenSample = [screenData[0], screenData[1], screenData[2]];
+            const screenSum = getPatchSumCanvas(pctx!, sx, sy);
+            if (screenSum < 0) continue;
 
-            const mapX = Math.max(0, Math.min(recW - 1, Math.floor((sx / srcCanvas.width) * recW)));
-            const mapY = Math.max(0, Math.min(recH - 1, Math.floor((sy / srcCanvas.height) * recH)));
+            const mapX = Math.max(
+              0,
+              Math.min(recW - 1, Math.floor((sx / srcCanvas.width) * recW)),
+            );
+            const mapY = Math.max(
+              0,
+              Math.min(recH - 1, Math.floor((sy / srcCanvas.height) * recH)),
+            );
 
-            const cap = getPixel(pixels, mapX, mapY, recW);
-            const capRot = getPixel(pixels, recW - 1 - mapX, recH - 1 - mapY, recW);
+            const capSum = getPatchSumBuffer(pixels, recW, mapX, mapY);
+            const capRotSum = getPatchSumBuffer(pixels, recW, recW - 1 - mapX, recH - 1 - mapY);
 
-            if (close(screenSample, [cap[0], cap[1], cap[2]])) normalVotes++;
-            if (close(screenSample, [capRot[0], capRot[1], capRot[2]])) rotVotes++;
+            if (Math.abs(screenSum - capSum) < Math.abs(screenSum - capRotSum)) normalScore++;
+            else rotScore++;
           }
 
-          rotated180 = rotVotes > normalVotes;
+          rotated180 = rotScore > normalScore;
         } catch (e) {
           rotated180 = false;
         }
