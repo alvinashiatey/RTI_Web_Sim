@@ -89,8 +89,8 @@ function _floatToDitheredUint8(
       const si = srcRowOff + x * 4;
       const di = dstRowOff + x * 4;
 
-      // Bayer threshold centred on 0  →  range ≈ [-0.5 … +0.48]
-      const t = _BAYER8[(y & 7) * 8 + (x & 7)] / 64.0 - 0.5;
+      // Bayer threshold centred on 0  →  range ≈ [-0.5 … +0.48], scale up slightly
+      const t = (_BAYER8[(y & 7) * 8 + (x & 7)] / 64.0 - 0.5) * 1.5;
 
       // RGB: dither.  Alpha: straight round.
       dst[di] = Math.max(0, Math.min(255, Math.round(src[si] * 255 + t)));
@@ -141,6 +141,12 @@ export async function exportAnimationFrames(
   const w = canvas.width;
   const h = canvas.height;
   const rt = new RenderTarget(w, h, { type: FloatType });
+
+  // Temporarily enable material dithering for the plane to further reduce
+  // banding in combination with the ordered-dither pass below.
+  const planeMat = plane.material as any;
+  const prevDither = planeMat?.dithering ?? false;
+  if (planeMat) planeMat.dithering = true;
 
   // Mark the RT as the *output* target so the renderer's full output
   // pipeline — ACES Filmic tone mapping + sRGB encoding — is applied,
@@ -211,6 +217,8 @@ export async function exportAnimationFrames(
     }
   } finally {
     rt.dispose();
+    // Restore material dithering state.
+    if (planeMat) planeMat.dithering = prevDither;
     // Restore canvas as the output target and resume the render loop.
     renderer.setOutputRenderTarget(null);
     startRenderLoop(ctx);
