@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rti-web-sim</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="rti-canvas" aria-label="RTI simulation canvas"></canvas>
+
+      <!-- Loading spinner -->
+      <div id="loading-spinner" hidden aria-label="Loading">
+        <div class="spinner"></div>
+      </div>
+
+      <!-- Image upload drop zone -->
+      <div
+        id="drop-zone"
+        role="button"
+        aria-label="Upload an image by dropping it here or clicking"
+      >
+        <span class="drop-label">Drop image here or click to upload</span>
+        <input
+          id="file-input"
+          type="file"
+          accept="image/*"
+          hidden
+          aria-label="Choose image file"
+        />
+      </div>
+
+      <!-- Help button -->
+      <button id="help-btn" aria-label="Show help" title="Help (H)">?</button>
+
+      <!-- Help overlay -->
+      <div id="help-overlay" hidden role="dialog" aria-label="Help">
+        <div class="help-content">
+          <h2>RTI Web Simulator</h2>
+          <p>
+            Reflectance Transformation Imaging (RTI) reveals surface details by
+            varying light direction over a subject. Upload any image to see
+            simulated raking-light effects.
+          </p>
+          <h3>Controls</h3>
+          <ul>
+            <li>
+              <strong>Tweakpane panel</strong> — adjust light direction,
+              intensity, color, and material properties
+            </li>
+            <li><strong>Mouse drag</strong> — orbit the camera</li>
+            <li><strong>Scroll</strong> — zoom in / out</li>
+          </ul>
+          <h3>Keyboard Shortcuts</h3>
+          <ul>
+            <li><kbd>R</kbd> — reset light to default position</li>
+            <li><kbd>S</kbd> — save a PNG snapshot</li>
+            <li><kbd>M</kbd> — toggle Mouse → Light mode</li>
+            <li><kbd>E</kbd> — cycle through image effects</li>
+            <li><kbd>H</kbd> / <kbd>?</kbd> — toggle this help</li>
+          </ul>
+          <button id="help-close">Close</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

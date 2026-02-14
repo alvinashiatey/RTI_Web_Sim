@@ -1,0 +1,243 @@
+/* ── Reset & full-viewport canvas ─────────────────────── */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #1a1a1a;
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
+  color: #e0e0e0;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+#rti-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Upload drop zone ─────────────────────────────────── */
+#drop-zone {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 28px;
+  border: 2px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  transition:
+    border-color 0.2s,
+    background 0.2s;
+  z-index: 10;
+  user-select: none;
+  text-align: center;
+  max-width: 90vw;
+}
+
+#drop-zone:hover,
+#drop-zone.drag-over {
+  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+#drop-zone.error {
+  border-color: #e05555;
+}
+
+.drop-label {
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
+  pointer-events: none;
+}
+
+/* ── Loading spinner ──────────────────────────────────── */
+#loading-spinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(26, 26, 26, 0.85);
+  z-index: 50;
+}
+
+#loading-spinner[hidden] {
+  display: none;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Help button ──────────────────────────────────────── */
+#help-btn {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  z-index: 10;
+  transition: background 0.2s;
+}
+
+#help-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* ── Help overlay ─────────────────────────────────────── */
+#help-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+}
+
+#help-overlay[hidden] {
+  display: none;
+}
+
+.help-content {
+  background: #2a2a2a;
+  border-radius: 12px;
+  padding: 28px 32px;
+  max-width: 480px;
+  width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  color: #ddd;
+  line-height: 1.55;
+}
+
+.help-content h2 {
+  margin-bottom: 8px;
+  color: #fff;
+}
+
+.help-content h3 {
+  margin-top: 16px;
+  margin-bottom: 4px;
+  color: #fff;
+}
+
+.help-content ul {
+  padding-left: 20px;
+  margin: 4px 0 8px;
+}
+
+.help-content kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #333;
+  font-family: inherit;
+  font-size: 0.85em;
+}
+
+.help-content button {
+  margin-top: 16px;
+  padding: 6px 20px;
+  border: 1px solid #555;
+  border-radius: 6px;
+  background: transparent;
+  color: #ddd;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.15s;
+}
+
+.help-content button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* ── Toast notification ───────────────────────────────── */
+#toast {
+  position: fixed;
+  bottom: 70px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  padding: 8px 20px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 0.85rem;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.3s,
+    transform 0.3s;
+  z-index: 200;
+}
+
+#toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ── Responsive tweaks ────────────────────────────────── */
+@media (max-width: 600px) {
+  /* Tweakpane collapse: let its default CSS handle it;
+     shrink drop zone on mobile */
+  #drop-zone {
+    padding: 8px 16px;
+    bottom: 12px;
+  }
+
+  .drop-label {
+    font-size: 0.75rem;
+  }
+
+  #help-btn {
+    bottom: 12px;
+    right: 12px;
+    width: 30px;
+    height: 30px;
+    font-size: 0.9rem;
+  }
+
+  .help-content {
+    padding: 20px 18px;
+  }
+}
