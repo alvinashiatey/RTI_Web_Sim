@@ -1,4 +1,1 @@
-#!/usr/bin/env sh
-. "$(dirname -- "$0")/_/husky.sh"
-
 pnpm install --frozen-lockfile || (echo 'Lockfile outdated, updating...' && pnpm install && git add pnpm-lock.yaml)
