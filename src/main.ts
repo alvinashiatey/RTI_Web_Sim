@@ -54,28 +54,6 @@ if (spinner) spinner.hidden = false;
     }
   });
 
-  // ── Mouse → Light direction ──────────────────────────────
-  canvas.addEventListener("mousemove", (e) => {
-    if (!controlState.mouseLight.enabled) return;
-
-    const rect = canvas.getBoundingClientRect();
-    // Normalise mouse position to [-1, 1]
-    const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    const ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
-
-    // Map to azimuth (0-360) and elevation (0-90)
-    // nx: -1 (left, 180°) → +1 (right, 0°)
-    // ny: -1 (top, 90° elev) → +1 (bottom, 0° elev)
-    const azimuth = ((Math.atan2(-ny, nx) * 180) / Math.PI + 360) % 360;
-    const elevation = (1 - Math.min(1, Math.sqrt(nx * nx + ny * ny))) * 90;
-
-    controlState.lightParams.azimuth = azimuth;
-    controlState.lightParams.elevation = elevation;
-    setLightPosition(lights.pointLight, controlState.lightParams);
-    syncHelper(lights);
-    controlState.pane.refresh();
-  });
-
   // ── Keyboard shortcuts (Phase 7) ─────────────────────────
   window.addEventListener("keydown", (e) => {
     // Ignore if user is typing in an input
@@ -94,16 +72,6 @@ if (spinner) spinner.hidden = false;
         // Save snapshot (cropped to plane area)
         controlState.saveSnapshot();
         showToast("Snapshot saved");
-        break;
-      case "m":
-        // Toggle mouse-light mode
-        controlState.mouseLight.enabled = !controlState.mouseLight.enabled;
-        controlState.pane.refresh();
-        showToast(
-          controlState.mouseLight.enabled
-            ? "Mouse → Light ON"
-            : "Mouse → Light OFF",
-        );
         break;
       case "e": {
         // Cycle through effects

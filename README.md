@@ -1,12 +1,13 @@
 # RTI Web Simulator
 
-A browser-based [Reflectance Transformation Imaging](https://en.wikipedia.org/wiki/Reflectance_transformation_imaging) (RTI) simulator built with Three.js. Upload any 2D image and interactively vary the light direction, intensity, and material properties to reveal surface details—just like real raking-light photography.
+A browser-based [Reflectance Transformation Imaging](https://en.wikipedia.org/wiki/Polynomial_texture_mapping) (RTI) simulator built with Three.js. Upload any 2D image and interactively vary the light direction, intensity, and material properties to reveal surface details—just like real raking-light photography.
 
 ![RTI Web Simulator screenshot](docs/screenshot.png)
 
 ## Features
 
-- **Interactive lighting** — drag-based azimuth/elevation control or real-time mouse-to-light mode
+- **Interactive lighting** — drag-based azimuth/elevation control
+- **Light animation** — automated azimuth sweep with configurable start, end, steps, and duration
 - **Material tuning** — roughness, metalness, and normal-map intensity sliders
 - **Auto normal-map generation** — Sobel-based normal map derived from the uploaded image
 - **GPU-accelerated effects** (via Three.js Shading Language / TSL):
@@ -17,7 +18,7 @@ A browser-based [Reflectance Transformation Imaging](https://en.wikipedia.org/wi
   - Chromatic Aberration
   - Halftone
 - **Save & share** — PNG snapshot export (cropped to the image plane), JSON settings import/export, shareable URL with encoded parameters
-- **Keyboard shortcuts** — `R` reset light · `S` save snapshot · `M` toggle mouse-light · `E` cycle effects · `H` help overlay
+- **Keyboard shortcuts** — `R` reset light · `S` save snapshot · `E` cycle effects · `H` help overlay
 
 ## Tech Stack
 
@@ -61,11 +62,12 @@ pnpm run preview  # serve the build locally
 ## Usage
 
 1. **Upload an image** — drag-and-drop onto the canvas or click the upload zone.
-2. **Move the light** — use the Tweakpane sliders (Azimuth / Elevation) or press `M` to drive the light with your mouse.
+2. **Move the light** — use the Tweakpane sliders (Azimuth / Elevation).
 3. **Adjust material** — tweak roughness, metalness, and normal-map strength in the Material folder.
 4. **Apply effects** — open the Effects folder and pick an effect from the dropdown, then tune its parameters. Press `E` to cycle.
-5. **Save your work** — press `S` for a PNG snapshot, or use Export/Import Settings for the full parameter set.
-6. **Share** — copy the URL; it encodes all current parameters (except the uploaded image).
+5. **Animate the light** — open the Animation folder, set start/end azimuth, number of steps, and duration, then click Play.
+6. **Save your work** — press `S` for a PNG snapshot, or use Export/Import Settings for the full parameter set.
+7. **Share** — copy the URL; it encodes all current parameters (except the uploaded image).
 
 ## Keyboard Shortcuts
 
@@ -73,7 +75,6 @@ pnpm run preview  # serve the build locally
 | --------- | ------------------------------- |
 | `R`       | Reset light to default position |
 | `S`       | Save PNG snapshot               |
-| `M`       | Toggle mouse → light mode       |
 | `E`       | Cycle through effects           |
 | `H` / `?` | Toggle help overlay             |
 

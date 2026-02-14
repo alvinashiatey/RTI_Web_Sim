@@ -28,8 +28,6 @@ export interface ControlState {
   pane: Pane;
   lightParams: LightParams;
   materialParams: MaterialParams;
-  /** When true, mouse position drives light direction */
-  mouseLight: { enabled: boolean };
   /** Image effects pipeline state */
   effectState: EffectState;
   /** Re-apply the active effect (call after effect/texture change) */
@@ -55,7 +53,6 @@ export function initControls(
 
   const lightParams: LightParams = { ...DEFAULT_LIGHT_PARAMS };
   const materialParams: MaterialParams = { ...DEFAULT_MATERIAL_PARAMS };
-  const mouseLight = { enabled: false };
   const effectState = createEffectState();
 
   const material = plane.material as MeshStandardNodeMaterial;
@@ -67,7 +64,6 @@ export function initControls(
     pane,
     lightParams,
     materialParams,
-    mouseLight,
     effectState,
     reapplyEffect,
     saveSnapshot: () => saveSnapshot(ctx),
@@ -80,10 +76,8 @@ export function initControls(
     applyEffect(effectState, material, state.originalTexture, state.pixelSize);
   }
 
-  // ── Mouse → Light toggle ───────────────────────────────
+  // ── Light Direction folder ─────────────────────────────
   const lightDir = pane.addFolder({ title: "Light Direction" });
-
-  lightDir.addBinding(mouseLight, "enabled", { label: "Mouse → Light" });
 
   lightDir
     .addBinding(lightParams, "azimuth", {
@@ -221,6 +215,84 @@ export function initControls(
     .on("change", () => {
       rebuildEffectUI();
     });
+
+  // ── Animation folder ───────────────────────────────────
+  const animFolder = pane.addFolder({ title: "Animation" });
+
+  const animParams = {
+    startAzimuth: 0,
+    endAzimuth: 360,
+    steps: 36,
+    duration: 3.0,
+  };
+
+  animFolder.addBinding(animParams, "startAzimuth", {
+    min: 0,
+    max: 360,
+    step: 1,
+    label: "Start (°)",
+  });
+  animFolder.addBinding(animParams, "endAzimuth", {
+    min: 0,
+    max: 360,
+    step: 1,
+    label: "End (°)",
+  });
+  animFolder.addBinding(animParams, "steps", {
+    min: 2,
+    max: 360,
+    step: 1,
+    label: "Steps",
+  });
+  animFolder.addBinding(animParams, "duration", {
+    min: 0.5,
+    max: 30,
+    step: 0.5,
+    label: "Duration (s)",
+  });
+
+  let animId: number | null = null;
+
+  function stopAnimation(): void {
+    if (animId != null) {
+      cancelAnimationFrame(animId);
+      animId = null;
+    }
+  }
+
+  function playAnimation(): void {
+    stopAnimation();
+    const { startAzimuth, endAzimuth, steps, duration } = animParams;
+    const totalMs = duration * 1000;
+    const startTime = performance.now();
+
+    function tick(): void {
+      const elapsed = performance.now() - startTime;
+      const t = Math.min(elapsed / totalMs, 1);
+
+      // Current step index (0-based)
+      const stepIdx = Math.min(Math.floor(t * steps), steps - 1);
+      const fraction = stepIdx / Math.max(steps - 1, 1);
+
+      // Interpolate azimuth along the shortest or specified arc
+      lightParams.azimuth =
+        startAzimuth + (endAzimuth - startAzimuth) * fraction;
+      setLightPosition(lights.pointLight, lightParams);
+      syncHelper(lights);
+      pane.refresh();
+
+      if (t < 1) {
+        animId = requestAnimationFrame(tick);
+      } else {
+        animId = null;
+      }
+    }
+
+    animId = requestAnimationFrame(tick);
+  }
+
+  animFolder.addButton({ title: "▶  Play" }).on("click", playAnimation);
+  animFolder.addButton({ title: "■  Stop" }).on("click", stopAnimation);
 
   // ── Save & Share folder (Phase 6) ──────────────────────
   const saveFolder = pane.addFolder({ title: "Save & Share" });

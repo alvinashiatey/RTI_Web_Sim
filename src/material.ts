@@ -34,7 +34,7 @@ export function loadDefaultTexture(plane: Mesh): Promise<Texture> {
 
   return new Promise((resolve, reject) => {
     loader.load(
-      "/sample.jpg",
+      `${import.meta.env.BASE_URL}sample.jpg`,
       (texture) => {
         texture.colorSpace = SRGBColorSpace;
 
