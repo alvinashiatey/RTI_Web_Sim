@@ -246,111 +246,113 @@ export async function exportAnimationVideo(
   lightParams: LightParams,
   lights: Lights,
   _pane: Pane,
-  animParams: { startAzimuth: number; endAzimuth: number; steps: number; duration: number },
+  animParams: {
+    startAzimuth: number;
+    endAzimuth: number;
+    steps: number;
+    duration: number;
+  },
   onProgress: (pct: number) => void,
 ): Promise<void> {
-  const { renderer, camera, scene, controls } = ctx;
-  const canvas = renderer.domElement as HTMLCanvasElement;
-
-  if (typeof (canvas as any).captureStream !== "function") {
-    throw new Error("canvas.captureStream() is not supported in this browser");
-  }
+  const { renderer, camera, scene, controls, plane } = ctx;
 
   // Choose the best-supported WebM mime type.
-  const mimeCandidates = [
-    "video/webm;codecs=vp9",
-    "video/webm;codecs=vp8",
-    "video/webm",
-  ];
+  const mimeCandidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
   let mime: string | undefined;
   for (const c of mimeCandidates) {
-    // Use the host's runtime check if available.
-    // (MediaRecorder.isTypeSupported may be unavailable in some envs.)
     try {
       if (typeof MediaRecorder !== "undefined" && (MediaRecorder as any).isTypeSupported?.(c)) {
         mime = c;
         break;
       }
     } catch (e) {
-      // ignore and continue
+      /* ignore */
     }
   }
   mime = mime ?? "video/webm";
 
-  // Compute an fps that maps `steps` → `duration` (frames per second).
   const fps = Math.max(1, Math.min(60, Math.round(animParams.steps / Math.max(animParams.duration, 0.001))));
 
-  // Temporarily increase the renderer backing resolution so the recorded
-  // WebM is higher quality. We bump the pixelRatio (capped) while keeping
-  // the CSS size unchanged, then restore it afterwards.
-  const cssW = canvas.clientWidth || window.innerWidth;
-  const cssH = canvas.clientHeight || window.innerHeight;
-  const origPR = (renderer as any).getPixelRatio ? (renderer as any).getPixelRatio() : Math.min(window.devicePixelRatio, 2);
+  // Recording resolution: default to 2× the canvas backing, capped to 3840px width.
+  const srcCanvas = renderer.domElement as HTMLCanvasElement;
+  const srcW = Math.max(1, srcCanvas.width);
+  const srcH = Math.max(1, srcCanvas.height);
+  const recScale = Math.min(3, Math.max(1, Math.floor(3840 / srcW)));
+  const recW = Math.min(3840, srcW * Math.min(2, recScale));
+  const recH = Math.round((recW / srcW) * srcH);
 
-  // Desired recording scale: 2× the current pixel ratio by default, cap to 4.
-  let desiredPR = Math.min(origPR * 2, 4);
-  // Avoid creating absurdly large canvases; cap backing width to 3840px.
-  if (Math.round(cssW * desiredPR) > 3840) {
-    desiredPR = Math.max(1, Math.floor(3840 / cssW));
+  // RenderTarget + hidden canvas capture path (higher-quality and deterministic).
+  const rt = new RenderTarget(recW, recH, { type: FloatType });
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = recW;
+  outCanvas.height = recH;
+  outCanvas.style.position = "fixed";
+  outCanvas.style.left = "-9999px";
+  outCanvas.style.top = "-9999px";
+  document.body.appendChild(outCanvas);
+  const outCtx = outCanvas.getContext("2d")!;
+
+  // Improve banding in recorded output by enabling material dithering.
+  const planeMat = (plane.material as any) ?? null;
+  const prevDither = planeMat?.dithering ?? false;
+  if (planeMat) planeMat.dithering = true;
+
+  if (typeof (outCanvas as any).captureStream !== "function") {
+    throw new Error("canvas.captureStream() is not supported in this browser");
   }
 
-  // `chunks` must be visible after the try/finally so produce the final blob
-  // once the renderer state has been restored.
+  const stream = outCanvas.captureStream(fps);
   const chunks: Blob[] = [];
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: mime });
+  } catch (err) {
+    recorder = new MediaRecorder(stream);
+  }
+  recorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size) chunks.push(ev.data);
+  };
+
+  // Pause the main loop and record frames rendered into `rt`.
+  renderer.setAnimationLoop(null);
+  recorder.start();
 
   try {
-    (renderer as any).setPixelRatio(desiredPR);
-    renderer.setSize(cssW, cssH);
+    renderer.setOutputRenderTarget(rt);
 
-    // Give the renderer a frame to settle at the new resolution.
-    await renderer.renderAsync(scene, camera);
+    for (let i = 0; i < animParams.steps; i++) {
+      const fraction = i / Math.max(animParams.steps - 1, 1);
+      lightParams.azimuth = animParams.startAzimuth + (animParams.endAzimuth - animParams.startAzimuth) * fraction;
+      setLightPosition(lights.pointLight, lightParams);
+      syncHelper(lights);
+      controls.update();
 
-    const stream = canvas.captureStream(fps);
+      await renderer.renderAsync(scene, camera);
 
-    let recorder: MediaRecorder;
-    try {
-      recorder = new MediaRecorder(stream, { mimeType: mime });
-    } catch (err) {
-      // Fallback to plain webm if the chosen mime isn't accepted by constructor.
-      recorder = new MediaRecorder(stream);
-    }
+      // Read full RT back and convert to 8-bit with ordered dithering.
+      const raw = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, recW, recH);
+      const bytesPerTexel = 16; // RGBA32Float
+      const alignedBytesPerRow = Math.ceil((recW * bytesPerTexel) / 256) * 256;
+      const alignedFloatsPerRow = alignedBytesPerRow / 4;
+      const pixels = _floatToDitheredUint8(raw as Float32Array, recW, recH, alignedFloatsPerRow);
 
-    recorder.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size) chunks.push(ev.data);
-    };
+      outCtx.putImageData(new ImageData(pixels, recW, recH), 0, 0);
 
-    // Pause the main animation loop and start recording.
-    renderer.setAnimationLoop(null);
-    recorder.start();
+      // Allow the compositor to sample the updated hidden canvas.
+      await new Promise((r) => requestAnimationFrame(r));
 
-    try {
-      for (let i = 0; i < animParams.steps; i++) {
-        const fraction = i / Math.max(animParams.steps - 1, 1);
-        lightParams.azimuth = animParams.startAzimuth + (animParams.endAzimuth - animParams.startAzimuth) * fraction;
-        setLightPosition(lights.pointLight, lightParams);
-        syncHelper(lights);
-        controls.update();
-
-        // Render a deterministic frame and let the browser compositor pick it up
-        await renderer.renderAsync(scene, camera);
-        await new Promise((r) => requestAnimationFrame(r));
-
-        onProgress(Math.round(((i + 1) / animParams.steps) * 100));
-      }
-    } finally {
-      // Stop recording and wait for the final blob(s).
-      recorder.stop();
-      await new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
-      });
-
-      // Resume the normal render loop.
-      startRenderLoop(ctx);
+      onProgress(Math.round(((i + 1) / animParams.steps) * 100));
     }
   } finally {
-    // Restore original renderer pixel ratio / size.
-    (renderer as any).setPixelRatio(origPR);
-    renderer.setSize(cssW, cssH);
+    recorder.stop();
+    await new Promise<void>((resolve) => (recorder.onstop = () => resolve()));
+
+    renderer.setOutputRenderTarget(null);
+    startRenderLoop(ctx);
+
+    if (planeMat) planeMat.dithering = prevDither;
+    rt.dispose();
+    outCanvas.remove();
   }
 
   if (chunks.length === 0) return;
