@@ -337,20 +337,7 @@ export async function exportAnimationVideo(
     // rotated 180°, false = normal orientation.
     let rotated180: boolean | null = null;
 
-    const rotate180 = (src: Uint8ClampedArray, w: number, h: number) => {
-      const out = new Uint8ClampedArray(src.length);
-      for (let yy = 0; yy < h; yy++) {
-        for (let xx = 0; xx < w; xx++) {
-          const si = (yy * w + xx) * 4;
-          const di = ((h - 1 - yy) * w + (w - 1 - xx)) * 4;
-          out[di] = src[si];
-          out[di + 1] = src[si + 1];
-          out[di + 2] = src[si + 2];
-          out[di + 3] = src[si + 3];
-        }
-      }
-      return out;
-    };
+
 
     for (let i = 0; i < animParams.steps; i++) {
       const fraction = i / Math.max(animParams.steps - 1, 1);
@@ -381,7 +368,9 @@ export async function exportAnimationVideo(
         alignedFloatsPerRow,
       );
 
-      // Detect/correct 180°-rotated readbacks on the first frame.
+      // Robust orientation detection (multi-sample voting).  Some backends
+      // return readback buffers with ambiguous regions where a single-pixel
+      // test can be wrong — sample multiple points and pick the majority.
       if (rotated180 === null) {
         try {
           const probe = document.createElement("canvas");
@@ -390,40 +379,62 @@ export async function exportAnimationVideo(
           const pctx = probe.getContext("2d");
           if (pctx) pctx.drawImage(srcCanvas, 0, 0);
 
-          const sampleX = Math.max(1, Math.min(srcCanvas.width - 2, Math.floor(srcCanvas.width / 4)));
-          const sampleY = Math.max(1, Math.min(srcCanvas.height - 2, Math.floor(srcCanvas.height / 4)));
-          const screenSample = pctx?.getImageData(sampleX, sampleY, 1, 1).data;
+          const samples: Array<[number, number]> = [
+            [0.2, 0.2],
+            [0.8, 0.2],
+            [0.2, 0.8],
+            [0.8, 0.8],
+            [0.5, 0.5],
+          ];
 
-          if (screenSample) {
-            const mapX = Math.floor((sampleX / srcCanvas.width) * recW);
-            const mapY = Math.floor((sampleY / srcCanvas.height) * recH);
+          let normalVotes = 0;
+          let rotVotes = 0;
 
-            const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
-              const i = (y * width + x) * 4;
-              return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]];
-            };
+          const getPixel = (arr: Uint8ClampedArray, x: number, y: number, width: number) => {
+            const i = (y * width + x) * 4;
+            return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]] as number[];
+          };
 
-            const close = (a: number[], b: Uint8ClampedArray, tol = 24) =>
-              Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+          const close = (a: number[], b: number[], tol = 32) =>
+            Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
 
-            const captured = getPixel(pixels, mapX, mapY, recW);
-            if (close(screenSample as unknown as number[], new Uint8ClampedArray(captured))) {
-              rotated180 = false;
-            } else {
-              const rot = getPixel(pixels, recW - 1 - mapX, recH - 1 - mapY, recW);
-              if (close(screenSample as unknown as number[], new Uint8ClampedArray(rot))) {
-                rotated180 = true;
-              } else {
-                rotated180 = false;
-              }
-            }
+          for (const [ox, oy] of samples) {
+            const sx = Math.max(1, Math.min(srcCanvas.width - 2, Math.floor(srcCanvas.width * ox)));
+            const sy = Math.max(1, Math.min(srcCanvas.height - 2, Math.floor(srcCanvas.height * oy)));
+            const screenData = pctx?.getImageData(sx, sy, 1, 1).data;
+            if (!screenData) continue;
+            const screenSample = [screenData[0], screenData[1], screenData[2]];
+
+            const mapX = Math.floor((sx / srcCanvas.width) * recW);
+            const mapY = Math.floor((sy / srcCanvas.height) * recH);
+
+            const cap = getPixel(pixels, mapX, mapY, recW);
+            const capRot = getPixel(pixels, recW - 1 - mapX, recH - 1 - mapY, recW);
+
+            if (close(screenSample, [cap[0], cap[1], cap[2]])) normalVotes++;
+            if (close(screenSample, [capRot[0], capRot[1], capRot[2]])) rotVotes++;
           }
+
+          rotated180 = rotVotes > normalVotes;
         } catch (e) {
           rotated180 = false;
         }
       }
 
-      if (rotated180) pixels = rotate180(pixels, recW, recH);
+      if (rotated180) {
+        const out = new Uint8ClampedArray(pixels.length);
+        for (let yy = 0; yy < recH; yy++) {
+          for (let xx = 0; xx < recW; xx++) {
+            const si = (yy * recW + xx) * 4;
+            const di = ((recH - 1 - yy) * recW + (recW - 1 - xx)) * 4;
+            out[di] = pixels[si];
+            out[di + 1] = pixels[si + 1];
+            out[di + 2] = pixels[si + 2];
+            out[di + 3] = pixels[si + 3];
+          }
+        }
+        pixels = out;
+      }
 
       outCtx.putImageData(new ImageData(pixels, recW, recH), 0, 0);
 
