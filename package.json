@@ -12,7 +12,7 @@
     "@tweakpane/core": "^2.0.5",
     "@types/three": "^0.182.0",
     "typescript": "~5.9.3",
-    "vite": "^8.0.0-beta.13"
+    "vite": "8.0.0-beta.14"
   },
   "pnpm": {
     "overrides": {
