@@ -234,3 +234,132 @@ export async function exportAnimationFrames(
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Export the same stepped animation as a recorded WebM video using
+ * MediaRecorder + canvas.captureStream(). The renderer is stepped
+ * deterministically (one render per animation step) so the resulting
+ * video matches the frame sequence produced by `exportAnimationFrames`.
+ */
+export async function exportAnimationVideo(
+  ctx: SceneContext,
+  lightParams: LightParams,
+  lights: Lights,
+  _pane: Pane,
+  animParams: { startAzimuth: number; endAzimuth: number; steps: number; duration: number },
+  onProgress: (pct: number) => void,
+): Promise<void> {
+  const { renderer, camera, scene, controls } = ctx;
+  const canvas = renderer.domElement as HTMLCanvasElement;
+
+  if (typeof (canvas as any).captureStream !== "function") {
+    throw new Error("canvas.captureStream() is not supported in this browser");
+  }
+
+  // Choose the best-supported WebM mime type.
+  const mimeCandidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  let mime: string | undefined;
+  for (const c of mimeCandidates) {
+    // Use the host's runtime check if available.
+    // (MediaRecorder.isTypeSupported may be unavailable in some envs.)
+    try {
+      if (typeof MediaRecorder !== "undefined" && (MediaRecorder as any).isTypeSupported?.(c)) {
+        mime = c;
+        break;
+      }
+    } catch (e) {
+      // ignore and continue
+    }
+  }
+  mime = mime ?? "video/webm";
+
+  // Compute an fps that maps `steps` → `duration` (frames per second).
+  const fps = Math.max(1, Math.min(60, Math.round(animParams.steps / Math.max(animParams.duration, 0.001))));
+
+  // Temporarily increase the renderer backing resolution so the recorded
+  // WebM is higher quality. We bump the pixelRatio (capped) while keeping
+  // the CSS size unchanged, then restore it afterwards.
+  const cssW = canvas.clientWidth || window.innerWidth;
+  const cssH = canvas.clientHeight || window.innerHeight;
+  const origPR = (renderer as any).getPixelRatio ? (renderer as any).getPixelRatio() : Math.min(window.devicePixelRatio, 2);
+
+  // Desired recording scale: 2× the current pixel ratio by default, cap to 4.
+  let desiredPR = Math.min(origPR * 2, 4);
+  // Avoid creating absurdly large canvases; cap backing width to 3840px.
+  if (Math.round(cssW * desiredPR) > 3840) {
+    desiredPR = Math.max(1, Math.floor(3840 / cssW));
+  }
+
+  // `chunks` must be visible after the try/finally so produce the final blob
+  // once the renderer state has been restored.
+  const chunks: Blob[] = [];
+
+  try {
+    (renderer as any).setPixelRatio(desiredPR);
+    renderer.setSize(cssW, cssH);
+
+    // Give the renderer a frame to settle at the new resolution.
+    await renderer.renderAsync(scene, camera);
+
+    const stream = canvas.captureStream(fps);
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: mime });
+    } catch (err) {
+      // Fallback to plain webm if the chosen mime isn't accepted by constructor.
+      recorder = new MediaRecorder(stream);
+    }
+
+    recorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size) chunks.push(ev.data);
+    };
+
+    // Pause the main animation loop and start recording.
+    renderer.setAnimationLoop(null);
+    recorder.start();
+
+    try {
+      for (let i = 0; i < animParams.steps; i++) {
+        const fraction = i / Math.max(animParams.steps - 1, 1);
+        lightParams.azimuth = animParams.startAzimuth + (animParams.endAzimuth - animParams.startAzimuth) * fraction;
+        setLightPosition(lights.pointLight, lightParams);
+        syncHelper(lights);
+        controls.update();
+
+        // Render a deterministic frame and let the browser compositor pick it up
+        await renderer.renderAsync(scene, camera);
+        await new Promise((r) => requestAnimationFrame(r));
+
+        onProgress(Math.round(((i + 1) / animParams.steps) * 100));
+      }
+    } finally {
+      // Stop recording and wait for the final blob(s).
+      recorder.stop();
+      await new Promise<void>((resolve) => {
+        recorder.onstop = () => resolve();
+      });
+
+      // Resume the normal render loop.
+      startRenderLoop(ctx);
+    }
+  } finally {
+    // Restore original renderer pixel ratio / size.
+    (renderer as any).setPixelRatio(origPR);
+    renderer.setSize(cssW, cssH);
+  }
+
+  if (chunks.length === 0) return;
+
+  const blob = new Blob(chunks, { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `rti-animation.${mime.includes("mp4") ? "mp4" : "webm"}`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
