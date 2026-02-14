@@ -346,13 +346,60 @@ export function saveSnapshot(ctx: SceneContext): void {
       const rw = bounds.width;
       const rh = bounds.height;
 
-      const raw = await (renderer as any).readRenderTargetPixelsAsync(
-        rt,
-        rx,
-        ry,
-        rw,
-        rh,
-      );
+      // Validate crop rect and defensively attempt GPU readback. If
+      // readback fails (some backends may not support the RT format after
+      // shader/material changes), fall back to capturing the visible canvas.
+      if (!Number.isFinite(rx) || !Number.isFinite(ry) || !Number.isFinite(rw) || !Number.isFinite(rh) || rw <= 0 || rh <= 0) {
+        console.warn("snapshot: invalid crop rect, falling back to canvas capture", { rx, ry, rw, rh });
+        const tmp = document.createElement("canvas");
+        tmp.width = w;
+        tmp.height = h;
+        const tmpCtx = tmp.getContext("2d");
+        if (tmpCtx) {
+          tmpCtx.drawImage(canvas, 0, 0);
+          const out = document.createElement("canvas");
+          out.width = Math.max(1, rw);
+          out.height = Math.max(1, rh);
+          const outCtx = out.getContext("2d");
+          if (outCtx) {
+            outCtx.drawImage(tmp, rx, bounds.y, rw, rh, 0, 0, rw, rh);
+            out.toBlob((blob) => blob && downloadBlob(blob, `rti-snapshot-${Date.now()}.png`));
+            return;
+          }
+        }
+      }
+
+      let raw: Float32Array | null = null;
+      try {
+        raw = await (renderer as any).readRenderTargetPixelsAsync(rt, rx, ry, rw, rh);
+      } catch (err) {
+        // Graceful fallback: warn and capture visible canvas crop instead.
+        // This avoids the uncaught TypeError (reading 'format') observed
+        // on some backends after toggling effects.
+        // eslint-disable-next-line no-console
+        console.warn("snapshot: readRenderTargetPixelsAsync failed, falling back to canvas capture", err);
+
+        const tmp = document.createElement("canvas");
+        tmp.width = w;
+        tmp.height = h;
+        const tmpCtx = tmp.getContext("2d");
+        if (tmpCtx) {
+          tmpCtx.drawImage(canvas, 0, 0);
+          const out = document.createElement("canvas");
+          out.width = rw;
+          out.height = rh;
+          const outCtx = out.getContext("2d");
+          if (outCtx) {
+            outCtx.drawImage(tmp, rx, bounds.y, rw, rh, 0, 0, rw, rh);
+            out.toBlob((blob) => blob && downloadBlob(blob, `rti-snapshot-${Date.now()}.png`));
+            return;
+          }
+        }
+      }
+
+      if (!raw) {
+        throw new Error("snapshot: GPU readback returned no data");
+      }
 
       const bytesPerTexel = 16; // RGBA32Float
       const alignedBytesPerRow = Math.ceil((rw * bytesPerTexel) / 256) * 256;
