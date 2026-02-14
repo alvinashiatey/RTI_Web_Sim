@@ -379,13 +379,25 @@ export async function exportAnimationVideo(
           const pctx = probe.getContext("2d", { willReadFrequently: true });
           if (pctx) pctx.drawImage(srcCanvas, 0, 0);
 
-          const samples: Array<[number, number]> = [
-            [0.2, 0.2],
-            [0.8, 0.2],
-            [0.2, 0.8],
-            [0.8, 0.8],
-            [0.5, 0.5],
-          ];
+          // Sample inside the plane bounding box (more reliable than using
+          // arbitrary canvas fractions). Fall back to center samples if the
+          // plane is off-screen.
+          const bounds = _planeScreenRect(camera, plane, srcCanvas.width, srcCanvas.height);
+          const samplePoints: Array<[number, number]> = [];
+          if (bounds) {
+            const { sx, sy, sw, sh } = bounds;
+            samplePoints.push([sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.25)]);
+            samplePoints.push([sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.25)]);
+            samplePoints.push([sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.75)]);
+            samplePoints.push([sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.75)]);
+            samplePoints.push([sx + Math.floor(sw * 0.5), sy + Math.floor(sh * 0.5)]);
+          } else {
+            samplePoints.push([Math.floor(srcCanvas.width * 0.25), Math.floor(srcCanvas.height * 0.25)]);
+            samplePoints.push([Math.floor(srcCanvas.width * 0.75), Math.floor(srcCanvas.height * 0.25)]);
+            samplePoints.push([Math.floor(srcCanvas.width * 0.25), Math.floor(srcCanvas.height * 0.75)]);
+            samplePoints.push([Math.floor(srcCanvas.width * 0.75), Math.floor(srcCanvas.height * 0.75)]);
+            samplePoints.push([Math.floor(srcCanvas.width * 0.5), Math.floor(srcCanvas.height * 0.5)]);
+          }
 
           let normalVotes = 0;
           let rotVotes = 0;
@@ -395,18 +407,16 @@ export async function exportAnimationVideo(
             return [arr[i], arr[i + 1], arr[i + 2], arr[i + 3]] as number[];
           };
 
-          const close = (a: number[], b: number[], tol = 32) =>
+          const close = (a: number[], b: number[], tol = 48) =>
             Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
 
-          for (const [ox, oy] of samples) {
-            const sx = Math.max(1, Math.min(srcCanvas.width - 2, Math.floor(srcCanvas.width * ox)));
-            const sy = Math.max(1, Math.min(srcCanvas.height - 2, Math.floor(srcCanvas.height * oy)));
+          for (const [sx, sy] of samplePoints) {
             const screenData = pctx?.getImageData(sx, sy, 1, 1).data;
             if (!screenData) continue;
             const screenSample = [screenData[0], screenData[1], screenData[2]];
 
-            const mapX = Math.floor((sx / srcCanvas.width) * recW);
-            const mapY = Math.floor((sy / srcCanvas.height) * recH);
+            const mapX = Math.max(0, Math.min(recW - 1, Math.floor((sx / srcCanvas.width) * recW)));
+            const mapY = Math.max(0, Math.min(recH - 1, Math.floor((sy / srcCanvas.height) * recH)));
 
             const cap = getPixel(pixels, mapX, mapY, recW);
             const capRot = getPixel(pixels, recW - 1 - mapX, recH - 1 - mapY, recW);
