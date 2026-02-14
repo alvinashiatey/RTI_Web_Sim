@@ -489,7 +489,9 @@ const halftone: Effect = {
     const radius = float(1.0).sub(lum).mul(0.5);
 
     // Inside dot? (smoothstep for anti-aliasing)
-    const dot_ = float(1.0).sub(smoothstep(radius.sub(0.02), radius.add(0.02), dist));
+    const dot_ = float(1.0).sub(
+      smoothstep(radius.sub(0.02), radius.add(0.02), dist),
+    );
 
     // Mono mode: black dot on white background
     const mono = vec3(float(1.0).sub(dot_));
