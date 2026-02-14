@@ -10,7 +10,6 @@ import type { SceneContext } from "../scene";
  */
 export function saveSnapshot(ctx: SceneContext): void {
   const { renderer, camera, plane, scene, controls } = ctx;
-
   // WebGPU discards the framebuffer after presentation, so the canvas
   // is blank unless we render a fresh frame right before reading it.
   controls.update();

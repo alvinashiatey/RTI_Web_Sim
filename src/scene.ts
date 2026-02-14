@@ -55,13 +55,7 @@ export async function createScene(
 
   // ── Plane geometry (1:1 default, will be resized on image load) ──
   const geometry = new PlaneGeometry(2, 2);
-
-  const material = new MeshStandardNodeMaterial({
-    color: 0xffffff,
-  });
-
-  material.dithering = true; // ✅ ADD THIS LINE
-
+  const material = new MeshStandardNodeMaterial({ color: 0xffffff });
   const plane = new Mesh(geometry, material);
   scene.add(plane);
 
