@@ -436,7 +436,11 @@ export async function exportAnimationVideo(
           // change colorization (normal map visualization, etc.).
           const patchRadius = 2; // 5×5 patch
 
-          const getPatchSumCanvas = (ctx: CanvasRenderingContext2D, cx: number, cy: number) => {
+          const getPatchSumCanvas = (
+            ctx: CanvasRenderingContext2D,
+            cx: number,
+            cy: number,
+          ) => {
             const sx = Math.max(0, cx - patchRadius);
             const sy = Math.max(0, cy - patchRadius);
             const sizeX = Math.min(patchRadius * 2 + 1, ctx.canvas.width - sx);
@@ -444,7 +448,8 @@ export async function exportAnimationVideo(
             try {
               const id = ctx.getImageData(sx, sy, sizeX, sizeY).data;
               let s = 0;
-              for (let i = 0; i < id.length; i += 4) s += id[i] + id[i + 1] + id[i + 2];
+              for (let i = 0; i < id.length; i += 4)
+                s += id[i] + id[i + 1] + id[i + 2];
               return s;
             } catch (e) {
               return -1;
@@ -489,9 +494,15 @@ export async function exportAnimationVideo(
             );
 
             const capSum = getPatchSumBuffer(pixels, recW, mapX, mapY);
-            const capRotSum = getPatchSumBuffer(pixels, recW, recW - 1 - mapX, recH - 1 - mapY);
+            const capRotSum = getPatchSumBuffer(
+              pixels,
+              recW,
+              recW - 1 - mapX,
+              recH - 1 - mapY,
+            );
 
-            if (Math.abs(screenSum - capSum) < Math.abs(screenSum - capRotSum)) normalScore++;
+            if (Math.abs(screenSum - capSum) < Math.abs(screenSum - capRotSum))
+              normalScore++;
             else rotScore++;
           }
 

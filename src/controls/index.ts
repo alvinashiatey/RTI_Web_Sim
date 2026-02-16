@@ -76,7 +76,7 @@ export function initControls(
     materialParams,
     effectState,
     reapplyEffect,
-    saveSnapshot: () => saveSnapshot(ctx),
+    saveSnapshot: () => saveSnapshot(ctx, () => reapplyEffect()),
     originalTexture: null,
     pixelSize: new Vector2(1 / 1024, 1 / 1024), // sensible default
   };
@@ -234,7 +234,7 @@ export function initControls(
 
   // Snapshot
   saveFolder.addButton({ title: "Save Snapshot" }).on("click", () => {
-    saveSnapshot(ctx);
+    saveSnapshot(ctx, () => reapplyEffect());
   });
 
   // Export settings

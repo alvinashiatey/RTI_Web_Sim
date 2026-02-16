@@ -51,7 +51,19 @@ export function applyEffect(
   }
 
   const effect = EFFECT_MAP.get(state.selected);
-  if (!effect) return;
+  if (!effect) {
+    // Defensive: selected effect name missing from registry — clear any
+    // previously-applied colour node so the previous effect doesn't "stick".
+    console.warn(
+      `applyEffect: selected effect "${state.selected}" not found — clearing previous effect`,
+    );
+    if (material.colorNode != null) {
+      material.colorNode = null;
+      material.needsUpdate = true;
+    }
+    state.instance = null;
+    return;
+  }
 
   const inst = effect.createNode(currentTexture, pixelSize);
 
