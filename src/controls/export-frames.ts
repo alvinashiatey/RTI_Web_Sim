@@ -484,9 +484,9 @@ export async function exportAnimationVideo(
   try {
     renderer.setOutputRenderTarget(rt);
 
-    // Orientation detection flag: null = not yet tested, true = data is
-    // rotated 180°, false = normal orientation.
-    let rotated180: boolean | null = null;
+    // Orientation detection: null = not yet tested, otherwise one of
+    // 'identity' | 'rot180' | 'flipX' | 'flipY'
+    let orientation: "identity" | "rot180" | "flipX" | "flipY" | null = null;
 
     for (let i = 0; i < animParams.steps; i++) {
       const fraction = i / Math.max(animParams.steps - 1, 1);
@@ -520,7 +520,7 @@ export async function exportAnimationVideo(
       // Robust orientation detection (multi-sample voting).  Some backends
       // return readback buffers with ambiguous regions where a single-pixel
       // test can be wrong — sample multiple points and pick the majority.
-      if (rotated180 === null) {
+      if (orientation === null) {
         try {
           const probe = document.createElement("canvas");
           probe.width = srcCanvas.width;
@@ -628,8 +628,7 @@ export async function exportAnimationVideo(
             return s;
           };
 
-          let normalScore = 0;
-          let rotScore = 0;
+          let scores = { identity: 0, rot180: 0, flipX: 0, flipY: 0 };
 
           for (const [sx, sy] of samplePoints) {
             const screenSum = getPatchSumCanvas(pctx!, sx, sy);
@@ -644,35 +643,61 @@ export async function exportAnimationVideo(
               Math.min(recH - 1, Math.floor((sy / srcCanvas.height) * recH)),
             );
 
-            const capSum = getPatchSumBuffer(pixels, recW, mapX, mapY);
-            const capRotSum = getPatchSumBuffer(
-              pixels,
-              recW,
-              recW - 1 - mapX,
-              recH - 1 - mapY,
-            );
+            const candidateSums = {
+              identity: getPatchSumBuffer(pixels, recW, mapX, mapY),
+              rot180: getPatchSumBuffer(
+                pixels,
+                recW,
+                recW - 1 - mapX,
+                recH - 1 - mapY,
+              ),
+              flipX: getPatchSumBuffer(pixels, recW, recW - 1 - mapX, mapY),
+              flipY: getPatchSumBuffer(pixels, recW, mapX, recH - 1 - mapY),
+            };
 
-            if (Math.abs(screenSum - capSum) < Math.abs(screenSum - capRotSum))
-              normalScore++;
-            else rotScore++;
+            // Pick candidate closest to screenSum
+            let best: keyof typeof candidateSums = "identity";
+            let bestDiff = Infinity;
+            for (const k of Object.keys(candidateSums) as Array<
+              keyof typeof candidateSums
+            >) {
+              const v = candidateSums[k];
+              const d = Math.abs(screenSum - v);
+              if (d < bestDiff) {
+                bestDiff = d;
+                best = k;
+              }
+            }
+            scores[best]++;
           }
 
-          rotated180 = rotScore > normalScore;
+          // Choose the highest-scoring orientation.
+          const winner = (
+            Object.keys(scores) as Array<keyof typeof scores>
+          ).reduce((a, b) => (scores[a] >= scores[b] ? a : b));
+          orientation = winner as "identity" | "rot180" | "flipX" | "flipY";
         } catch (e) {
-          rotated180 = false;
+          orientation = "identity";
         }
       }
-
-      if (rotated180) {
+      // Apply orientation correction if needed.
+      if (orientation && orientation !== "identity") {
         const out = new Uint8ClampedArray(pixels.length);
         for (let yy = 0; yy < recH; yy++) {
           for (let xx = 0; xx < recW; xx++) {
             const si = (yy * recW + xx) * 4;
-            const di = ((recH - 1 - yy) * recW + (recW - 1 - xx)) * 4;
-            out[di] = pixels[si];
-            out[di + 1] = pixels[si + 1];
-            out[di + 2] = pixels[si + 2];
-            out[di + 3] = pixels[si + 3];
+            let diIndex = 0;
+            if (orientation === "rot180") {
+              diIndex = ((recH - 1 - yy) * recW + (recW - 1 - xx)) * 4;
+            } else if (orientation === "flipX") {
+              diIndex = (yy * recW + (recW - 1 - xx)) * 4;
+            } else if (orientation === "flipY") {
+              diIndex = ((recH - 1 - yy) * recW + xx) * 4;
+            }
+            out[diIndex] = pixels[si];
+            out[diIndex + 1] = pixels[si + 1];
+            out[diIndex + 2] = pixels[si + 2];
+            out[diIndex + 3] = pixels[si + 3];
           }
         }
         pixels = out;
