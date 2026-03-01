@@ -2,7 +2,7 @@ import type { Pane } from "tweakpane";
 import type { Lights, LightParams } from "../lighting";
 import { setLightPosition, syncHelper } from "../lighting";
 import type { SceneContext } from "../scene";
-import { exportAnimationFrames, exportAnimationVideo } from "./export-frames";
+import { exportAnimationFrames } from "./export-frames";
 
 export interface AnimParams {
   startAzimuth: number;
@@ -154,40 +154,5 @@ export function buildAnimationFolder(
     }
   });
 
-  // Export the animation as a WebM video (MediaRecorder + captureStream)
-  const exportVideoBtn = animFolder.addButton({ title: "Export Video (WebM)" });
-  let exportingVideo = false;
-  exportVideoBtn.on("click", async () => {
-    if (exportingVideo) return;
-    exportingVideo = true;
-    const savedAzimuth = lightParams.azimuth;
-    exportVideoBtn.title = "Exporting… 0%";
-    try {
-      await exportAnimationVideo(
-        ctx,
-        lightParams,
-        lights,
-        pane,
-        animParams,
-        (pct) => {
-          exportVideoBtn.title = `Exporting… ${pct}%`;
-        },
-      );
-    } catch (err) {
-      // keep error handling minimal — log + toast
-      // eslint-disable-next-line no-console
-      console.error(err);
-      // show a simple alert so users know something went wrong
-      alert(
-        `Video export failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    } finally {
-      lightParams.azimuth = savedAzimuth;
-      setLightPosition(lights.pointLight, lightParams);
-      syncHelper(lights);
-      pane.refresh();
-      exportVideoBtn.title = "Export Video (WebM)";
-      exportingVideo = false;
-    }
-  });
+  // (Video export removed)
 }
