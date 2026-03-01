@@ -4,6 +4,11 @@ import type { LightParams, Lights } from "../lighting";
 import { setLightPosition, syncHelper } from "../lighting";
 import { startRenderLoop, type SceneContext } from "../scene";
 import { buildZip, type ZipEntry } from "./zip";
+import {
+  computePlaneScreenRect,
+  drawImageCrop,
+  canvasToBlob,
+} from "./capture-utils";
 
 /**
  * Compute the plane's bounding rectangle on screen (in pixels).
@@ -32,6 +37,7 @@ function _planeScreenRect(
     minY = Infinity,
     maxX = -Infinity,
     maxY = -Infinity;
+
   for (const c of corners) {
     c.project(camera);
     const px = ((c.x + 1) / 2) * w;
@@ -75,7 +81,7 @@ function _floatToDitheredUint8(
   width: number,
   height: number,
   alignedFloatsPerRow: number,
-): Uint8ClampedArray<ArrayBuffer> {
+): Uint8ClampedArray {
   const dst = new Uint8ClampedArray(width * height * 4);
   const dstStride = width * 4;
 
@@ -109,6 +115,202 @@ function _floatToDitheredUint8(
   return dst;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                            Readback orientation                             */
+/* -------------------------------------------------------------------------- */
+
+type _ReadbackOrientation = "normal" | "flipX" | "flipY" | "flipXY";
+
+function _clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+function _buildSamplePoints(
+  canvasW: number,
+  canvasH: number,
+  bounds: { sx: number; sy: number; sw: number; sh: number } | null,
+): Array<[number, number]> {
+  if (bounds) {
+    const { sx, sy, sw, sh } = bounds;
+    return [
+      [sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.25)],
+      [sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.25)],
+      [sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.75)],
+      [sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.75)],
+      [sx + Math.floor(sw * 0.5), sy + Math.floor(sh * 0.5)],
+    ];
+  }
+
+  return [
+    [Math.floor(canvasW * 0.25), Math.floor(canvasH * 0.25)],
+    [Math.floor(canvasW * 0.75), Math.floor(canvasH * 0.25)],
+    [Math.floor(canvasW * 0.25), Math.floor(canvasH * 0.75)],
+    [Math.floor(canvasW * 0.75), Math.floor(canvasH * 0.75)],
+    [Math.floor(canvasW * 0.5), Math.floor(canvasH * 0.5)],
+  ];
+}
+
+function _patchSumCanvas(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  patchRadius: number,
+): number {
+  const sx = Math.max(0, cx - patchRadius);
+  const sy = Math.max(0, cy - patchRadius);
+  const sizeX = Math.min(patchRadius * 2 + 1, ctx.canvas.width - sx);
+  const sizeY = Math.min(patchRadius * 2 + 1, ctx.canvas.height - sy);
+
+  try {
+    const id = ctx.getImageData(sx, sy, sizeX, sizeY).data;
+    let s = 0;
+    for (let i = 0; i < id.length; i += 4) s += id[i] + id[i + 1] + id[i + 2];
+    return s;
+  } catch {
+    return -1;
+  }
+}
+
+function _patchSumBuffer(
+  buf: Uint8ClampedArray,
+  bw: number,
+  bh: number,
+  cx: number,
+  cy: number,
+  patchRadius: number,
+): number {
+  const sx = Math.max(0, cx - patchRadius);
+  const sy = Math.max(0, cy - patchRadius);
+  const ex = Math.min(bw - 1, cx + patchRadius);
+  const ey = Math.min(bh - 1, cy + patchRadius);
+
+  let s = 0;
+  for (let y = sy; y <= ey; y++) {
+    for (let x = sx; x <= ex; x++) {
+      const i = (y * bw + x) * 4;
+      s += buf[i] + buf[i + 1] + buf[i + 2];
+    }
+  }
+  return s;
+}
+
+function _mapByOrientation(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  orientation: _ReadbackOrientation,
+): [number, number] {
+  switch (orientation) {
+    case "flipX":
+      return [w - 1 - x, y];
+    case "flipY":
+      return [x, h - 1 - y];
+    case "flipXY":
+      return [w - 1 - x, h - 1 - y];
+    default:
+      return [x, y];
+  }
+}
+
+function _detectReadbackOrientation(params: {
+  screenCtx: CanvasRenderingContext2D;
+  samplePoints: Array<[number, number]>;
+  pixels: Uint8ClampedArray;
+  captureWidth: number;
+  captureHeight: number;
+  mapScreenToCapture: (sx: number, sy: number) => [number, number];
+  patchRadius?: number;
+}): _ReadbackOrientation {
+  const {
+    screenCtx,
+    samplePoints,
+    pixels,
+    captureWidth,
+    captureHeight,
+    mapScreenToCapture,
+  } = params;
+
+  const patchRadius = params.patchRadius ?? 2;
+  const candidates: _ReadbackOrientation[] = [
+    "normal",
+    "flipX",
+    "flipY",
+    "flipXY",
+  ];
+  const error: Record<_ReadbackOrientation, number> = {
+    normal: 0,
+    flipX: 0,
+    flipY: 0,
+    flipXY: 0,
+  };
+
+  let validSamples = 0;
+
+  for (const [sx, sy] of samplePoints) {
+    const screenSum = _patchSumCanvas(screenCtx, sx, sy, patchRadius);
+    if (screenSum < 0) continue;
+
+    let [mx, my] = mapScreenToCapture(sx, sy);
+    mx = _clamp(mx, 0, captureWidth - 1);
+    my = _clamp(my, 0, captureHeight - 1);
+
+    for (const o of candidates) {
+      const [tx, ty] = _mapByOrientation(
+        mx,
+        my,
+        captureWidth,
+        captureHeight,
+        o,
+      );
+      const capSum = _patchSumBuffer(
+        pixels,
+        captureWidth,
+        captureHeight,
+        tx,
+        ty,
+        patchRadius,
+      );
+      error[o] += Math.abs(screenSum - capSum);
+    }
+
+    validSamples++;
+  }
+
+  if (validSamples === 0) return "normal";
+
+  let best: _ReadbackOrientation = "normal";
+  for (const o of candidates) {
+    if (error[o] < error[best]) best = o;
+  }
+  return best;
+}
+
+function _applyReadbackOrientation(
+  pixels: Uint8ClampedArray,
+  w: number,
+  h: number,
+  orientation: _ReadbackOrientation,
+): Uint8ClampedArray {
+  if (orientation === "normal") return pixels;
+
+  const out = new Uint8ClampedArray(pixels.length);
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4;
+      const [tx, ty] = _mapByOrientation(x, y, w, h, orientation);
+      const di = (ty * w + tx) * 4;
+      out[di] = pixels[si];
+      out[di + 1] = pixels[si + 1];
+      out[di + 2] = pixels[si + 2];
+      out[di + 3] = pixels[si + 3];
+    }
+  }
+
+  return out;
+}
+
 /**
  * Render each animation step using the renderer's full output pipeline
  * (tone mapping + sRGB) into a high-precision offscreen RenderTarget,
@@ -135,12 +337,7 @@ export async function exportAnimationFrames(
   // Pause the main animation loop so it doesn't race with our renders.
   renderer.setAnimationLoop(null);
 
-  // Create a FloatType render target so tone-mapped + sRGB values are
-  // stored at full precision (no 8-bit quantisation on the GPU).
   const canvas = renderer.domElement as HTMLCanvasElement;
-  const w = canvas.width;
-  const h = canvas.height;
-  const rt = new RenderTarget(w, h, { type: FloatType });
 
   // Temporarily enable material dithering for the plane to further reduce
   // banding in combination with the ordered-dither pass below.
@@ -148,10 +345,10 @@ export async function exportAnimationFrames(
   const prevDither = planeMat?.dithering ?? false;
   if (planeMat) planeMat.dithering = true;
 
-  // Mark the RT as the *output* target so the renderer's full output
-  // pipeline — ACES Filmic tone mapping + sRGB encoding — is applied,
-  // exactly matching the live canvas appearance.
-  renderer.setOutputRenderTarget(rt);
+  // Use the visible canvas as the output target; capture is done via
+  // `drawImage` from the displayed canvas (no GPU readback here).
+
+  // (readback orientation helpers are used by video export)
 
   try {
     for (let i = 0; i < steps; i++) {
@@ -162,217 +359,23 @@ export async function exportAnimationFrames(
       syncHelper(lights);
       controls.update();
 
-      // Render through the normal pipeline — output lands in `rt`.
+      // Render to the visible canvas and capture via drawImage (same path
+      // as `saveSnapshot`), avoiding GPU readback + manual pixel reformat.
+      renderer.setOutputRenderTarget(null);
       renderer.render(scene, camera);
 
-      // Read pixels directly from GPU memory.
-      const rect = _planeScreenRect(camera, plane, w, h);
-      const rx = rect ? rect.sx : 0;
-      // readRenderTargetPixelsAsync uses bottom-left origin (GL convention).
-      // Our screen rect has top-left origin, so flip Y.
-      const ry = rect ? h - rect.sy - rect.sh : 0;
-      const rw = rect ? rect.sw : w;
-      const rh = rect ? rect.sh : h;
-
-      const rawBuffer = await renderer.readRenderTargetPixelsAsync(
-        rt,
-        rx,
-        ry,
-        rw,
-        rh,
+      const bounds = computePlaneScreenRect(
+        camera,
+        plane,
+        canvas.width,
+        canvas.height,
       );
+      const cropped = drawImageCrop(canvas, bounds, {
+        colorSpace: "display-p3",
+        alpha: true,
+      } as CanvasRenderingContext2DSettings);
 
-      // WebGPU pads each row to 256-byte alignment.  For RGBA32Float
-      // (16 bytes/texel) the padded stride may exceed rw * 4 floats.
-      const bytesPerTexel = 16; // RGBA32Float
-      const alignedBytesPerRow = Math.ceil((rw * bytesPerTexel) / 256) * 256;
-      const alignedFloatsPerRow = alignedBytesPerRow / 4;
-
-      // Convert float buffer → dithered Uint8, flipping rows.
-      let pixels = _floatToDitheredUint8(
-        rawBuffer as Float32Array,
-        rw,
-        rh,
-        alignedFloatsPerRow,
-      );
-
-      // Some backends return readback buffers rotated 180°. Detect and
-      // correct that by comparing small patches from the on-screen
-      // canvas with the captured buffer; if rotated, flip both axes.
-      try {
-        const probe = document.createElement("canvas");
-        probe.width = canvas.width;
-        probe.height = canvas.height;
-        const pctx = probe.getContext("2d", { willReadFrequently: true });
-        if (pctx) pctx.drawImage(canvas, 0, 0);
-
-        const bounds = _planeScreenRect(
-          camera,
-          plane,
-          canvas.width,
-          canvas.height,
-        );
-        const samplePoints: Array<[number, number]> = [];
-        if (bounds) {
-          const { sx, sy, sw, sh } = bounds;
-          samplePoints.push([
-            sx + Math.floor(sw * 0.25),
-            sy + Math.floor(sh * 0.25),
-          ]);
-          samplePoints.push([
-            sx + Math.floor(sw * 0.75),
-            sy + Math.floor(sh * 0.25),
-          ]);
-          samplePoints.push([
-            sx + Math.floor(sw * 0.25),
-            sy + Math.floor(sh * 0.75),
-          ]);
-          samplePoints.push([
-            sx + Math.floor(sw * 0.75),
-            sy + Math.floor(sh * 0.75),
-          ]);
-          samplePoints.push([
-            sx + Math.floor(sw * 0.5),
-            sy + Math.floor(sh * 0.5),
-          ]);
-        } else {
-          samplePoints.push([
-            Math.floor(canvas.width * 0.25),
-            Math.floor(canvas.height * 0.25),
-          ]);
-          samplePoints.push([
-            Math.floor(canvas.width * 0.75),
-            Math.floor(canvas.height * 0.25),
-          ]);
-          samplePoints.push([
-            Math.floor(canvas.width * 0.25),
-            Math.floor(canvas.height * 0.75),
-          ]);
-          samplePoints.push([
-            Math.floor(canvas.width * 0.75),
-            Math.floor(canvas.height * 0.75),
-          ]);
-          samplePoints.push([
-            Math.floor(canvas.width * 0.5),
-            Math.floor(canvas.height * 0.5),
-          ]);
-        }
-
-        const patchR = 2;
-        const getPatchSumCanvas = (
-          ctx2: CanvasRenderingContext2D,
-          cx: number,
-          cy: number,
-        ) => {
-          const sx = Math.max(0, cx - patchR);
-          const sy = Math.max(0, cy - patchR);
-          const sizeX = Math.min(patchR * 2 + 1, ctx2.canvas.width - sx);
-          const sizeY = Math.min(patchR * 2 + 1, ctx2.canvas.height - sy);
-          try {
-            const id = ctx2.getImageData(sx, sy, sizeX, sizeY).data;
-            let s = 0;
-            for (let i = 0; i < id.length; i += 4)
-              s += id[i] + id[i + 1] + id[i + 2];
-            return s;
-          } catch (e) {
-            return -1;
-          }
-        };
-
-        const getPatchSumBuffer = (
-          buf: Uint8ClampedArray,
-          bw: number,
-          cx: number,
-          cy: number,
-        ) => {
-          const sx = Math.max(0, cx - patchR);
-          const sy = Math.max(0, cy - patchR);
-          const ex = Math.min(bw - 1, cx + patchR);
-          const eh = Math.floor(buf.length / 4 / bw) - 1;
-          const ey = Math.max(0, Math.min(eh, cy + patchR));
-          let s = 0;
-          for (let y = sy; y <= ey; y++) {
-            for (let x = sx; x <= ex; x++) {
-              const i = (y * bw + x) * 4;
-              s += buf[i] + buf[i + 1] + buf[i + 2];
-            }
-          }
-          return s;
-        };
-
-        let normalScore = 0;
-        let rotScore = 0;
-
-        for (const [sx, sy] of samplePoints) {
-          const screenSum = getPatchSumCanvas(pctx!, sx, sy);
-          if (screenSum < 0) continue;
-
-          let mapX: number;
-          let mapY: number;
-          if (bounds) {
-            const localX = sx - bounds.sx;
-            const localY = sy - bounds.sy;
-            mapX = Math.max(
-              0,
-              Math.min(rw - 1, Math.floor((localX / bounds.sw) * rw)),
-            );
-            mapY = Math.max(
-              0,
-              Math.min(rh - 1, Math.floor((localY / bounds.sh) * rh)),
-            );
-          } else {
-            mapX = Math.max(
-              0,
-              Math.min(rw - 1, Math.floor((sx / canvas.width) * rw)),
-            );
-            mapY = Math.max(
-              0,
-              Math.min(rh - 1, Math.floor((sy / canvas.height) * rh)),
-            );
-          }
-
-          const capSum = getPatchSumBuffer(pixels, rw, mapX, mapY);
-          const capRotSum = getPatchSumBuffer(
-            pixels,
-            rw,
-            rw - 1 - mapX,
-            rh - 1 - mapY,
-          );
-
-          if (Math.abs(screenSum - capSum) < Math.abs(screenSum - capRotSum))
-            normalScore++;
-          else rotScore++;
-        }
-
-        if (rotScore > normalScore) {
-          const out = new Uint8ClampedArray(pixels.length);
-          for (let yy = 0; yy < rh; yy++) {
-            for (let xx = 0; xx < rw; xx++) {
-              const si = (yy * rw + xx) * 4;
-              const di = ((rh - 1 - yy) * rw + (rw - 1 - xx)) * 4;
-              out[di] = pixels[si];
-              out[di + 1] = pixels[si + 1];
-              out[di + 2] = pixels[si + 2];
-              out[di + 3] = pixels[si + 3];
-            }
-          }
-          pixels = out;
-        }
-      } catch (e) {
-        // Orientation detection failed — fall back to no-op.
-      }
-
-      // Paint onto a temporary canvas to encode as PNG.
-      const tmp = document.createElement("canvas");
-      tmp.width = rw;
-      tmp.height = rh;
-      const ctx2d = tmp.getContext("2d")!;
-      ctx2d.putImageData(new ImageData(pixels, rw, rh), 0, 0);
-
-      const blob = await new Promise<Blob | null>((resolve) => {
-        tmp.toBlob((b) => resolve(b), "image/png");
-      });
-
+      const blob = await canvasToBlob(cropped, "image/png", 1);
       if (blob) {
         const data = new Uint8Array(await blob.arrayBuffer());
         const num = String(i + 1).padStart(padLen, "0");
@@ -382,7 +385,7 @@ export async function exportAnimationFrames(
       onProgress(Math.round(((i + 1) / steps) * 100));
     }
   } finally {
-    rt.dispose();
+    // (no RT to dispose when using canvas capture path)
     // Restore material dithering state.
     if (planeMat) planeMat.dithering = prevDither;
     // Restore canvas as the output target and resume the render loop.
@@ -397,6 +400,222 @@ export async function exportAnimationFrames(
   const a = document.createElement("a");
   a.href = url;
   a.download = `rti-frames-${Date.now()}.zip`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Export the same stepped animation as a recorded WebM video using
+ * MediaRecorder + canvas.captureStream(). The renderer is stepped
+ * deterministically (one render per animation step) so the resulting
+ * video matches the frame sequence produced by `exportAnimationFrames`.
+ */
+export async function exportAnimationVideo(
+  ctx: SceneContext,
+  lightParams: LightParams,
+  lights: Lights,
+  _pane: Pane,
+  animParams: {
+    startAzimuth: number;
+    endAzimuth: number;
+    steps: number;
+    duration: number;
+  },
+  onProgress: (pct: number) => void,
+): Promise<void> {
+  const { renderer, camera, scene, controls, plane } = ctx;
+
+  // Choose the best-supported WebM mime type.
+  const mimeCandidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  let mime: string | undefined;
+  for (const c of mimeCandidates) {
+    try {
+      if (
+        typeof MediaRecorder !== "undefined" &&
+        (MediaRecorder as any).isTypeSupported?.(c)
+      ) {
+        mime = c;
+        break;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  mime = mime ?? "video/webm";
+
+  const fps = Math.max(
+    1,
+    Math.min(
+      60,
+      Math.round(animParams.steps / Math.max(animParams.duration, 0.001)),
+    ),
+  );
+
+  // Recording resolution: default to 2× the canvas backing, capped to 3840px width.
+  const srcCanvas = renderer.domElement as HTMLCanvasElement;
+  const srcW = Math.max(1, srcCanvas.width);
+  const srcH = Math.max(1, srcCanvas.height);
+  const quality = (animParams as any).recordQuality ?? 2;
+  const recW = Math.min(3840, Math.max(1, Math.round(srcW * quality)));
+  const recH = Math.max(1, Math.round((recW / srcW) * srcH));
+
+  // RenderTarget + hidden canvas capture path (higher-quality and deterministic).
+  const rt = new RenderTarget(recW, recH, { type: FloatType });
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = recW;
+  outCanvas.height = recH;
+  outCanvas.style.position = "fixed";
+  outCanvas.style.left = "-9999px";
+  outCanvas.style.top = "-9999px";
+  document.body.appendChild(outCanvas);
+  const outCtx = outCanvas.getContext("2d")!;
+
+  // Improve banding in recorded output by enabling material dithering.
+  const planeMat = (plane.material as any) ?? null;
+  const prevDither = planeMat?.dithering ?? false;
+  if (planeMat) planeMat.dithering = true;
+
+  if (typeof (outCanvas as any).captureStream !== "function") {
+    throw new Error("canvas.captureStream() is not supported in this browser");
+  }
+
+  const stream = outCanvas.captureStream(fps);
+  const chunks: Blob[] = [];
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: mime });
+  } catch (err) {
+    recorder = new MediaRecorder(stream);
+  }
+  recorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size) chunks.push(ev.data);
+  };
+
+  // Pause the main loop and record frames rendered into `rt`.
+  renderer.setAnimationLoop(null);
+  recorder.start();
+
+  // Detect once, apply every frame.
+  let readbackOrientation: _ReadbackOrientation | null = null;
+
+  try {
+    renderer.setOutputRenderTarget(rt);
+
+    for (let i = 0; i < animParams.steps; i++) {
+      const fraction = i / Math.max(animParams.steps - 1, 1);
+      lightParams.azimuth =
+        animParams.startAzimuth +
+        (animParams.endAzimuth - animParams.startAzimuth) * fraction;
+      setLightPosition(lights.pointLight, lightParams);
+      syncHelper(lights);
+      controls.update();
+
+      renderer.render(scene, camera);
+
+      // Read full RT back and convert to 8-bit with ordered dithering.
+      const raw = await renderer.readRenderTargetPixelsAsync(
+        rt,
+        0,
+        0,
+        recW,
+        recH,
+      );
+      const bytesPerTexel = 16; // RGBA32Float
+      const alignedBytesPerRow = Math.ceil((recW * bytesPerTexel) / 256) * 256;
+      const alignedFloatsPerRow = alignedBytesPerRow / 4;
+      let pixels = _floatToDitheredUint8(
+        raw as Float32Array,
+        recW,
+        recH,
+        alignedFloatsPerRow,
+      );
+
+      if (readbackOrientation === null) {
+        try {
+          const probe = document.createElement("canvas");
+          probe.width = srcCanvas.width;
+          probe.height = srcCanvas.height;
+          const pctx = probe.getContext("2d", { willReadFrequently: true });
+
+          if (pctx) {
+            pctx.drawImage(srcCanvas, 0, 0);
+
+            const bounds = _planeScreenRect(
+              camera,
+              plane,
+              srcCanvas.width,
+              srcCanvas.height,
+            );
+            const samplePoints = _buildSamplePoints(
+              srcCanvas.width,
+              srcCanvas.height,
+              bounds,
+            );
+
+            readbackOrientation = _detectReadbackOrientation({
+              screenCtx: pctx,
+              samplePoints,
+              pixels,
+              captureWidth: recW,
+              captureHeight: recH,
+              patchRadius: 2,
+              mapScreenToCapture: (sx, sy) => {
+                const mapX = Math.floor(
+                  (sx / Math.max(srcCanvas.width, 1)) * recW,
+                );
+                const mapY = Math.floor(
+                  (sy / Math.max(srcCanvas.height, 1)) * recH,
+                );
+                return [mapX, mapY];
+              },
+            });
+          } else {
+            readbackOrientation = "normal";
+          }
+        } catch {
+          readbackOrientation = "normal";
+        }
+      }
+
+      pixels = _applyReadbackOrientation(
+        pixels,
+        recW,
+        recH,
+        readbackOrientation ?? "normal",
+      );
+
+      const img = new ImageData(recW, recH);
+      img.data.set(pixels as unknown as Uint8ClampedArray);
+      outCtx.putImageData(img, 0, 0);
+
+      // Allow the compositor to sample the updated hidden canvas.
+      await new Promise((r) => requestAnimationFrame(r));
+
+      onProgress(Math.round(((i + 1) / animParams.steps) * 100));
+    }
+  } finally {
+    recorder.stop();
+    await new Promise<void>((resolve) => (recorder.onstop = () => resolve()));
+
+    renderer.setOutputRenderTarget(null);
+    startRenderLoop(ctx);
+
+    if (planeMat) planeMat.dithering = prevDither;
+    rt.dispose();
+    outCanvas.remove();
+  }
+
+  if (chunks.length === 0) return;
+
+  const blob = new Blob(chunks, { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `rti-animation.${mime.includes("mp4") ? "mp4" : "webm"}`;
   a.click();
   URL.revokeObjectURL(url);
 }
