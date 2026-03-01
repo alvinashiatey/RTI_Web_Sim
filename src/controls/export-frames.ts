@@ -189,12 +189,106 @@ export async function exportAnimationFrames(
       const alignedFloatsPerRow = alignedBytesPerRow / 4;
 
       // Convert float buffer → dithered Uint8, flipping rows.
-      const pixels = _floatToDitheredUint8(
+      let pixels = _floatToDitheredUint8(
         rawBuffer as Float32Array,
         rw,
         rh,
         alignedFloatsPerRow,
       );
+
+      // Some backends return readback buffers rotated 180°. Detect and
+      // correct that by comparing small patches from the on-screen
+      // canvas with the captured buffer; if rotated, flip both axes.
+      try {
+        const probe = document.createElement("canvas");
+        probe.width = canvas.width;
+        probe.height = canvas.height;
+        const pctx = probe.getContext("2d", { willReadFrequently: true });
+        if (pctx) pctx.drawImage(canvas, 0, 0);
+
+        const bounds = _planeScreenRect(camera, plane, canvas.width, canvas.height);
+        const samplePoints: Array<[number, number]> = [];
+        if (bounds) {
+          const { sx, sy, sw, sh } = bounds;
+          samplePoints.push([sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.25)]);
+          samplePoints.push([sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.25)]);
+          samplePoints.push([sx + Math.floor(sw * 0.25), sy + Math.floor(sh * 0.75)]);
+          samplePoints.push([sx + Math.floor(sw * 0.75), sy + Math.floor(sh * 0.75)]);
+          samplePoints.push([sx + Math.floor(sw * 0.5), sy + Math.floor(sh * 0.5)]);
+        } else {
+          samplePoints.push([Math.floor(canvas.width * 0.25), Math.floor(canvas.height * 0.25)]);
+          samplePoints.push([Math.floor(canvas.width * 0.75), Math.floor(canvas.height * 0.25)]);
+          samplePoints.push([Math.floor(canvas.width * 0.25), Math.floor(canvas.height * 0.75)]);
+          samplePoints.push([Math.floor(canvas.width * 0.75), Math.floor(canvas.height * 0.75)]);
+          samplePoints.push([Math.floor(canvas.width * 0.5), Math.floor(canvas.height * 0.5)]);
+        }
+
+        const patchR = 2;
+        const getPatchSumCanvas = (ctx2: CanvasRenderingContext2D, cx: number, cy: number) => {
+          const sx = Math.max(0, cx - patchR);
+          const sy = Math.max(0, cy - patchR);
+          const sizeX = Math.min(patchR * 2 + 1, ctx2.canvas.width - sx);
+          const sizeY = Math.min(patchR * 2 + 1, ctx2.canvas.height - sy);
+          try {
+            const id = ctx2.getImageData(sx, sy, sizeX, sizeY).data;
+            let s = 0;
+            for (let i = 0; i < id.length; i += 4) s += id[i] + id[i + 1] + id[i + 2];
+            return s;
+          } catch (e) {
+            return -1;
+          }
+        };
+
+        const getPatchSumBuffer = (buf: Uint8ClampedArray, bw: number, cx: number, cy: number) => {
+          const sx = Math.max(0, cx - patchR);
+          const sy = Math.max(0, cy - patchR);
+          const ex = Math.min(bw - 1, cx + patchR);
+          const eh = Math.floor(buf.length / 4 / bw) - 1;
+          const ey = Math.max(0, Math.min(eh, cy + patchR));
+          let s = 0;
+          for (let y = sy; y <= ey; y++) {
+            for (let x = sx; x <= ex; x++) {
+              const i = (y * bw + x) * 4;
+              s += buf[i] + buf[i + 1] + buf[i + 2];
+            }
+          }
+          return s;
+        };
+
+        let normalScore = 0;
+        let rotScore = 0;
+
+        for (const [sx, sy] of samplePoints) {
+          const screenSum = getPatchSumCanvas(pctx!, sx, sy);
+          if (screenSum < 0) continue;
+
+          const mapX = Math.max(0, Math.min(rw - 1, Math.floor((sx / canvas.width) * rw)));
+          const mapY = Math.max(0, Math.min(rh - 1, Math.floor((sy / canvas.height) * rh)));
+
+          const capSum = getPatchSumBuffer(pixels, rw, mapX, mapY);
+          const capRotSum = getPatchSumBuffer(pixels, rw, rw - 1 - mapX, rh - 1 - mapY);
+
+          if (Math.abs(screenSum - capSum) < Math.abs(screenSum - capRotSum)) normalScore++;
+          else rotScore++;
+        }
+
+        if (rotScore > normalScore) {
+          const out = new Uint8ClampedArray(pixels.length);
+          for (let yy = 0; yy < rh; yy++) {
+            for (let xx = 0; xx < rw; xx++) {
+              const si = (yy * rw + xx) * 4;
+              const di = ((rh - 1 - yy) * rw + (rw - 1 - xx)) * 4;
+              out[di] = pixels[si];
+              out[di + 1] = pixels[si + 1];
+              out[di + 2] = pixels[si + 2];
+              out[di + 3] = pixels[si + 3];
+            }
+          }
+          pixels = out;
+        }
+      } catch (e) {
+        // Orientation detection failed — fall back to no-op.
+      }
 
       // Paint onto a temporary canvas to encode as PNG.
       const tmp = document.createElement("canvas");
